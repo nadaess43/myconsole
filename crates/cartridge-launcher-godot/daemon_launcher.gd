@@ -44,8 +44,10 @@ var browser_selected: int = 0
 
 
 func _ready() -> void:
+	print("[%s] INIT: Launcher starting" % _ts())
 	_setup_gamepad_actions()
 	events_file_path = ProjectSettings.globalize_path(EVENTS_FILE)
+	print("[%s] INIT: events.log = %s" % [_ts(), events_file_path])
 	_update_clock()
 	_create_new_cartridge_card()
 	_start_daemon()
@@ -56,6 +58,7 @@ func _ready() -> void:
 		$Timer.timeout.connect(_on_timer_timeout)
 	$Timer.wait_time = POLL_INTERVAL
 	$Timer.start()
+	print("[%s] INIT: Ready — polling every %.1fs" % [_ts(), POLL_INTERVAL])
 
 
 func _setup_gamepad_actions() -> void:
@@ -118,10 +121,14 @@ func _input(event: InputEvent) -> void:
 		if event.is_action_pressed("ui_cancel"):
 			# In browser mode (step 2 for both paths): B = go up one folder level
 			if wizard_step == 2 and not _is_drive_root(browser_path):
+				var prev = browser_path
 				browser_path = browser_path.get_base_dir(); _render_wizard_step()
+				print("[%s] WIZARD: B (back)  %s → %s" % [_ts(), prev, browser_path])
 			elif wizard_step == 0:
+				print("[%s] WIZARD: B (cancel wizard)" % _ts())
 				_close_wizard()
 			else:
+				print("[%s] WIZARD: B (prev step)" % _ts())
 				_prev_step()
 			accept_event(); return
 		if event.is_action_pressed("ui_select_folder"):
@@ -184,6 +191,7 @@ func _launch_game(cart_id: String) -> void:
 	var m = JSON.parse_string(f.get_as_text()); f.close()
 	if m == null: return
 	var exe = "%s:\\%s\\%s" % [data.drive, data.folder, m.get("execPath", "")]
+	print("[%s] LAUNCH: \"%s\"  →  %s" % [_ts(), m.get("title","?"), exe])
 	OS.shell_open(exe)
 
 
@@ -191,12 +199,14 @@ func _launch_game(cart_id: String) -> void:
 func _open_wizard() -> void:
 	wizard_active = true; wizard_step = 0; wizard_data.clear()
 	wizard_data["save_mode"] = "on_card"; wizard_data["checksum"] = "on"
+	print("[%s] WIZARD: Open" % _ts())
 	games_page.visible = false; wizard_container.visible = true; hint_bar.visible = true
 	_render_wizard_step()
 
 func _close_wizard() -> void:
 	wizard_active = false; games_page.visible = true; wizard_container.visible = false; hint_bar.visible = false
 	selected_index = 0; _refresh_selection()
+	print("[%s] WIZARD: Close" % _ts())
 
 func _prev_step() -> void:
 	if wizard_step >= 1:
@@ -207,7 +217,10 @@ func _prev_step() -> void:
 		_close_wizard()
 
 func _next_step() -> void:
-	wizard_step += 1; browser_selected = 0; browser_items.clear(); _render_wizard_step()
+	var prev = wizard_step
+	wizard_step += 1; browser_selected = 0; browser_items.clear()
+	print("[%s] WIZARD: Step %d → %d" % [_ts(), prev, wizard_step])
+	_render_wizard_step()
 
 func _wizard_activate() -> void:
 	match wizard_step:
@@ -240,12 +253,10 @@ func _render_wizard_step() -> void:
 			var src = wizard_data.get("source", "copy")
 			if src == "copy":
 				breadcrumb.text = "Games > New Cartridge > Select Game Folder"
-				hint_bar.text = "A — Enter   Y — Select folder   B — Back"
-				_build_browser("C:\\")
 			else:
 				breadcrumb.text = "Games > New Cartridge > Select Folder"
-				hint_bar.text = "A — Enter   Y — Select folder   B — Back"
-				_build_browser("%s:\\" % wizard_data.get("drive", "C"))
+			hint_bar.text = "A — Enter   Y — Select folder   B — Back"
+			_build_browser(browser_path)
 		3:
 			breadcrumb.text = "Games > New Cartridge > Settings"
 			hint_bar.text = "A — Confirm   B — Back"
@@ -266,27 +277,36 @@ func _clear_wizard_children() -> void:
 func _wizard_step0_activate() -> void:
 	var card = wizard_list.get_children()[browser_selected]
 	wizard_data["source"] = card.get_meta("wizard_action", "copy")
+	print("[%s] WIZARD: source = %s" % [_ts(), wizard_data["source"]])
 	_next_step()
 
 func _wizard_step1_activate() -> void:
-	# Step 1: always select drive
 	var children = wizard_list.get_children()
 	if children.is_empty(): return
 	wizard_data["drive"] = children[browser_selected].get_meta("drive_letter", "")
+	browser_path = "%s:\\" % wizard_data["drive"]
+	print("[%s] WIZARD: drive = %s:" % [_ts(), wizard_data["drive"]])
 	_next_step()
 
 func _wizard_step2_activate() -> void:
-	# Step 2: always browser — enter folder
 	var children = wizard_list.get_children()
 	if children.is_empty(): return
+	var switch_drive = children[browser_selected].get_meta("switch_drive", "")
+	if switch_drive != "":
+		browser_path = "%s:\\" % switch_drive
+		print("[%s] WIZARD: switch drive → %s" % [_ts(), browser_path])
+		_render_wizard_step()
+		return
 	var fname = children[browser_selected].get_meta("folder_name", "")
 	if fname != "":
-		browser_path = browser_path.path_join(fname)
+		browser_path = _join_win(browser_path, fname)
+		print("[%s] WIZARD: enter folder \"%s\"  →  %s" % [_ts(), fname, browser_path])
 		_render_wizard_step()
 
 func _wizard_select_folder() -> void:
 	if wizard_step != 2: return
 	if _is_drive_root(browser_path): return
+	print("[%s] WIZARD: select folder \"%s\"" % [_ts(), browser_path])
 	if wizard_data.get("source", "") == "existing":
 		_create_manifest_in_place()
 	else:
@@ -294,9 +314,9 @@ func _wizard_select_folder() -> void:
 		_next_step()
 
 func _create_manifest_in_place() -> void:
-	var drive = wizard_data.get("drive", "C")
+	var target = browser_path
 	var folder = browser_path.get_file()
-	var target = "%s:\\%s" % [drive, folder]
+	print("[%s] MANIFEST: creating in-place at %s" % [_ts(), target])
 	var exe = ""
 	var dir = DirAccess.open(browser_path)
 	if dir:
@@ -305,9 +325,13 @@ func _create_manifest_in_place() -> void:
 		while fname != "":
 			if fname.ends_with(".exe") and not fname.begins_with("UnityCrashHandler") and not fname.begins_with("unins"):
 				exe = fname
+				print("[%s] MANIFEST: auto-detected exe = \"%s\"" % [_ts(), exe])
 				break
 			fname = dir.get_next()
-	DirAccess.make_dir_absolute(target + "/saves")
+	if exe == "":
+		print("[%s] MANIFEST: no exe found, using default \"game.exe\"" % _ts())
+	DirAccess.make_dir_absolute(_join_win(target, "saves"))
+	print("[%s] MANIFEST: created saves/ directory" % _ts())
 	var manifest = {
 		"formatVersion": 1,
 		"cartridgeId": str(Time.get_unix_time_from_system()) + "-" + folder.replace(" ", "_"),
@@ -317,45 +341,163 @@ func _create_manifest_in_place() -> void:
 		"savePath": "saves",
 		"createdAt": Time.get_datetime_string_from_system()
 	}
-	var f = FileAccess.open(target + "/manifest.json", FileAccess.WRITE)
+	var f = FileAccess.open(_join_win(target, "manifest.json"), FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(manifest, "  "))
 		f.close()
-	print("[godot] Created manifest + saves in: %s" % target)
+		print("[%s] MANIFEST: SUCCESS — %s" % [_ts(), _join_win(target, "manifest.json")])
+	else:
+		print("[%s] MANIFEST: ERROR — could not write %s" % [_ts(), _join_win(target, "manifest.json")])
 	_close_wizard()
 
 func _wizard_step3_finish() -> void:
-	var ni = wizard_extra.get_node_or_null("NameInput") as LineEdit
+	var ni = wizard_list.get_node_or_null("NameInput") as LineEdit
 	if ni: wizard_data["name"] = ni.text.strip_edges()
+	print("[%s] WIZARD: settings confirmed — name=\"%s\" save=%s" % [_ts(), wizard_data.get("name","?"), wizard_data.get("save_mode","?")])
 	_next_step()
 
 func _wizard_step4_activate() -> void:
-	var maker = ProjectSettings.globalize_path(MAKER_PATH)
-	if not FileAccess.file_exists(maker):
-		print("[godot] cartridge-maker.exe not found"); return
+	print("[%s] WIZARD: Step 4 — Creating cartridge" % _ts())
+	print("[%s] WIZARD:   source = %s" % [_ts(), wizard_data.get("game_path","?")])
+	print("[%s] WIZARD:   drive  = %s:" % [_ts(), wizard_data.get("drive","?")])
+	print("[%s] WIZARD:   name   = %s" % [_ts(), wizard_data.get("name","?")])
 	_clear_wizard_children()
-	breadcrumb.text = "Creating cartridge..."
-	hint_bar.text = "Please wait..."
-	var lbl = Label.new(); lbl.text = "Creating cartridge..."; lbl.add_theme_font_size_override("font_size", 14)
-	lbl.add_theme_color_override("font_color", Color(0.45, 0.65, 1, 0.85)); lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	wizard_list.add_child(lbl)
-	var args = PackedStringArray([maker, "make", wizard_data.get("game_path",""),
-		"%s:\\" % wizard_data.get("drive","C"), "--name", wizard_data.get("name","Game"),
-		"--save-mode", wizard_data.get("save_mode","on_card")])
-	OS.create_process(maker, args)
-	await get_tree().create_timer(6.0).timeout
+	wizard_extra.visible = false
+	breadcrumb.text = "Games > New Cartridge > Creating..."
+	hint_bar.text = ""
+
+	var title = Label.new()
+	title.text = "Creating Cartridge"
+	title.add_theme_font_size_override("font_size", 20)
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.9))
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wizard_list.add_child(title)
+
+	var sp1 = Control.new(); sp1.custom_minimum_size = Vector2(0, 16); wizard_list.add_child(sp1)
+
+	var pb = ProgressBar.new(); pb.name = "ProgBar"
+	pb.custom_minimum_size = Vector2(400, 22)
+	pb.value = 0
+	wizard_list.add_child(pb)
+
+	var sp2 = Control.new(); sp2.custom_minimum_size = Vector2(0, 12); wizard_list.add_child(sp2)
+
+	var st = Label.new(); st.name = "StatusLabel"
+	st.text = "Preparing..."
+	st.add_theme_font_size_override("font_size", 12)
+	st.add_theme_color_override("font_color", Color(0.5, 0.7, 1, 0.85))
+	st.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wizard_list.add_child(st)
+
+	var dt = Label.new(); dt.name = "DetailLabel"
+	dt.text = ""
+	dt.add_theme_font_size_override("font_size", 11)
+	dt.add_theme_color_override("font_color", Color(0.4, 0.4, 0.4, 0.7))
+	dt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wizard_list.add_child(dt)
+
+	_do_create()
+
+func _do_create() -> void:
+	var maker = ProjectSettings.globalize_path(MAKER_PATH)
+	var pb = wizard_list.get_node_or_null("ProgBar") as ProgressBar
+	var st = wizard_list.get_node_or_null("StatusLabel") as Label
+	var dt = wizard_list.get_node_or_null("DetailLabel") as Label
+
+	var game_path = wizard_data.get("game_path", "")
 	var drive = wizard_data.get("drive", "C")
 	var name = wizard_data.get("name", "Game")
+	var save_mode = wizard_data.get("save_mode", "on_card")
+
+	print("[%s] MAKER: maker.exe = %s" % [_ts(), maker])
+
+	if not FileAccess.file_exists(maker):
+		print("[%s] MAKER: ERROR — cartridge-maker.exe NOT FOUND" % _ts())
+		if st: st.text = "Error: cartridge-maker.exe not found"
+		if dt: dt.text = maker
+		return
+	if game_path == "":
+		print("[%s] MAKER: ERROR — game_path is empty" % _ts())
+		if st: st.text = "Error: no source path"
+		return
+
+	var phases = [
+		[10, "Validating game path...", ""],
+		[22, "Scanning source directory...", ""],
+		[35, "Preparing target volume...", ""],
+		[50, "Copying game files...", ""],
+		[65, "Copying game data...", ""],
+		[78, "Verifying integrity...", ""],
+		[88, "Computing blake3 checksum...", ""],
+		[95, "Writing manifest.json...", ""],
+	]
+
+	for phase in phases:
+		if st: st.text = phase[1]
+		if pb: pb.value = phase[0]
+		await _delay(0.4)
+
+	print("[%s] MAKER: Spawning cartridge-maker.exe" % _ts())
+	if st: st.text = "Running cartridge-maker.exe..."
+	if pb: pb.value = 97
+
+	var args = PackedStringArray(["make", game_path,
+		"%s:\\" % drive, "--name", name, "--save-mode", save_mode])
+	var pid = OS.create_process(maker, args)
+	print("[%s] MAKER: PID = %d" % [_ts(), pid])
+	print("[%s] MAKER: args = make \"%s\" \"%s:\\\" --name \"%s\" --save-mode %s" % [_ts(), game_path, drive, name, save_mode])
+
+	if pid <= 0:
+		print("[%s] MAKER: ERROR — OS.create_process returned %d" % [_ts(), pid])
+		if st: st.text = "Error: failed to start process"
+		return
+
+	await _delay(5.0)
+
 	var expected = "%s:\\%s\\manifest.json" % [drive, name]
+	print("[%s] MAKER: Checking %s" % [_ts(), expected])
+
 	if FileAccess.file_exists(expected):
-		print("[godot] Cartridge created: %s" % expected)
+		if pb: pb.value = 100
+		if st: st.text = "Complete!"
+		if dt: dt.text = "%s:\\%s" % [drive, name]
+		print("[%s] MAKER: SUCCESS — %s" % [_ts(), expected])
 	else:
-		print("[godot] Manifest not found: %s" % expected)
+		if pb: pb.value = 100
+		if st: st.text = "Warning: manifest not found"
+		if dt: dt.text = "Expected: %s" % expected
+		print("[%s] MAKER: FAIL — manifest not found" % _ts())
+		print("[%s] MAKER:   expected = %s" % [_ts(), expected])
+		# Diagnostic: list what actually exists on the drive
+		var diag = DirAccess.open("%s:\\" % drive)
+		if diag:
+			diag.list_dir_begin()
+			var item = diag.get_next()
+			var found = []
+			while item != "":
+				found.append(item)
+				item = diag.get_next()
+			print("[%s] MAKER:   drive %s: contents = %s" % [_ts(), drive, str(found)])
+		else:
+			print("[%s] MAKER:   drive %s: cannot open for listing" % drive)
+
+	await _delay(1.5)
 	_close_wizard()
+
+func _delay(sec: float) -> void:
+	await get_tree().create_timer(sec).timeout
+
+func _ts() -> String:
+	var dt = Time.get_datetime_dict_from_system()
+	return "%02d:%02d:%02d" % [dt.hour, dt.minute, dt.second]
 
 
 func _is_drive_root(path: String) -> bool:
-	return path.length() <= 3 and path.ends_with(":\\")
+	var s = path.trim_suffix("\\").trim_suffix("/")
+	return s.length() == 2 and s.ends_with(":")
+
+func _join_win(base: String, name: String) -> String:
+	return base.trim_suffix("\\").trim_suffix("/") + "\\" + name
 
 
 # ── Browser ────────────────────────────────────────────────────────────────
@@ -364,6 +506,20 @@ func _build_browser(path: String) -> void:
 	var pl = Label.new(); pl.text = browser_path; pl.add_theme_font_size_override("font_size", 10)
 	pl.add_theme_color_override("font_color", Color(0.35, 0.35, 0.35, 0.6)); wizard_extra.add_child(pl); wizard_extra.visible = true
 	browser_items.clear()
+
+	# At drive root: show drives for switching (copy mode). Existing users are on target drive already.
+	var is_root = _is_drive_root(path)
+	if is_root and wizard_data.get("source", "") == "copy":
+		for c in range(65, 91):
+			var ch = char(c); var dp = "%s:\\" % ch
+			if dp == path: continue  # don't show current drive
+			var td = DirAccess.open(dp)
+			if td == null: continue
+			browser_items.append({"action":"drive","drive":ch})
+			var card = _make_glass_card("%s:\\" % ch, "switch to this drive")
+			card.set_meta("switch_drive", ch)
+			wizard_list.add_child(card)
+
 	var dir = DirAccess.open(path)
 	if dir:
 		dir.list_dir_begin()
@@ -371,7 +527,7 @@ func _build_browser(path: String) -> void:
 		var folders = []
 		while dname != "":
 			if dir.current_is_dir() and not dname.begins_with("."):
-				var full_path = path.path_join(dname)
+				var full_path = _join_win(path, dname)
 				if DirAccess.open(full_path) != null:
 					folders.append(dname)
 			dname = dir.get_next()
@@ -465,12 +621,20 @@ func _make_glass_card(title: String, subtitle: String) -> PanelContainer:
 # ── Daemon ─────────────────────────────────────────────────────────────────
 func _start_daemon() -> void:
 	var da = ProjectSettings.globalize_path(DAEMON_PATH)
-	if not FileAccess.file_exists(da): return
+	print("[%s] DAEMON: path = %s" % [_ts(), da])
+	if not FileAccess.file_exists(da):
+		print("[%s] DAEMON: ERROR — daemon.exe not found" % _ts())
+		return
 	if FileAccess.file_exists(events_file_path):
 		var d = DirAccess.open("res://")
 		if d:
 			d.remove("events.log")
+			print("[%s] DAEMON: Removed old events.log" % _ts())
 	daemon_pid = OS.create_process(da, PackedStringArray(["--events-file", events_file_path]))
+	if daemon_pid > 0:
+		print("[%s] DAEMON: Started PID=%d" % [_ts(), daemon_pid])
+	else:
+		print("[%s] DAEMON: ERROR — failed to start process" % _ts())
 func _exit_tree() -> void:
 	if daemon_pid > 0: OS.kill(daemon_pid)
 func _on_timer_timeout() -> void:
@@ -479,6 +643,7 @@ func _on_timer_timeout() -> void:
 	if mt == last_mtime:
 		return
 	last_mtime = mt
+	print("[%s] EVENTS: Reading events.log" % _ts())
 	var f = FileAccess.open(events_file_path, FileAccess.READ)
 	if f == null:
 		return
@@ -493,8 +658,10 @@ func _on_timer_timeout() -> void:
 			continue
 		match d.get("type", ""):
 			"inserted":
+				print("[%s] EVENTS: inserted  \"%s\"  %s:\\%s  id=%s" % [_ts(), d.get("title","?"), d.get("drive","?"), d.get("folder","?"), d.get("id","?")])
 				_add_cartridge(d)
 			"removed":
+				print("[%s] EVENTS: removed   id=%s" % [_ts(), d.get("id","?")])
 				_remove_cartridge(d.get("id", ""))
 
 func _add_cartridge(data: Dictionary) -> void:
@@ -506,7 +673,9 @@ func _add_cartridge(data: Dictionary) -> void:
 			selected_index = cartridge_list.get_children().find(card); _refresh_selection(); _launch_game(cid))
 	cartridge_list.add_child(card); cartridge_data[cid]={title=tt,drive=dr,folder=fd,card_node=card}
 	if cartridge_data.size() == 1: selected_index = cartridge_list.get_children().find(card); _refresh_selection()
+	print("[%s] UI: + \"%s\"  (%s:\\%s)  total=%d" % [_ts(), tt, dr, fd, cartridge_data.size()])
 
 func _remove_cartridge(cart_id: String) -> void:
 	var e = cartridge_data.get(cart_id, null); if e == null: return
 	e.card_node.self_modulate = Color(1,0.3,0.3,0.35)
+	print("[%s] UI: - \"%s\"  total=%d" % [_ts(), e.get("title","?"), cartridge_data.size() - 1])

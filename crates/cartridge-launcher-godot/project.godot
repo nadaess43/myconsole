@@ -12,5 +12,5 @@ config_version=5
 
 config/name="Cartridge Launcher"
 config/description="Minimal cartridge launcher — list cartridges detected by the background daemon."
-run/main_scene="uid://dd6u61dvv4yev"
+run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.7")

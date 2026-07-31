@@ -1,0 +1,1735 @@
+================================================================================
+FULL PROJECT CODE — Cartridge Launcher
+================================================================================
+Date: 2026-07-31
+Goal: Console-like game launcher using physical SD cards as "cartridges."
+  - cartridge-core: manifest format (Rust library)
+  - cartridge-maker: CLI to copy game folder → SD card + manifest.json (Rust binary)
+  - cartridge-daemon: background service detects cartridges (Rust binary, Windows)
+  - cartridge-launcher-godot: UI launcher (Godot 4.7, GDScript)
+================================================================================
+
+================================================================================
+FILE: Cargo.toml (workspace root)
+================================================================================
+[workspace]
+resolver = "2"
+members = [
+    "crates/cartridge-core",
+    "crates/cartridge-daemon",
+    "crates/cartridge-godot-ext",
+    "crates/cartridge-maker",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["cartridge-team"]
+
+================================================================================
+FILE: crates/cartridge-core/Cargo.toml
+================================================================================
+[package]
+name = "cartridge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Cartridge manifest types, serialization, and validation"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+blake3 = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+
+================================================================================
+FILE: crates/cartridge-core/src/lib.rs
+================================================================================
+//! Cartridge manifest types, serialization, and validation.
+//!
+//! This crate defines the canonical data structures for the cartridge ecosystem:
+//! - [`Manifest`] — the JSON file placed in each game folder on physical media.
+//! - [`SaveMode`] — where save data lives (`on_card` or `local`).
+//! - [`Cksum`] — integrity checksum of game data.
+//!
+//! The manifest is the "tablet" marker file (`manifest.json`) that the daemon scans
+//! for when a physical volume is connected. It identifies the game, tells the launcher
+//! what executable to run, and how to handle saves.
+
+pub mod error;
+pub mod manifest;
+
+pub use error::CoreError;
+pub use manifest::{Cksum, Manifest, SaveMode, FORMAT_VERSION};
+
+================================================================================
+FILE: crates/cartridge-core/src/error.rs
+================================================================================
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum CoreError {
+    #[error("serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("validation error: {0}")]
+    Validation(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("UUID error: {0}")]
+    Uuid(#[from] uuid::Error),
+}
+
+================================================================================
+FILE: crates/cartridge-core/src/manifest.rs
+================================================================================
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::CoreError;
+
+/// Current manifest format version.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Where save data lives for this cartridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SaveMode {
+    OnCard,
+    Local,
+}
+
+impl SaveMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SaveMode::OnCard => "on_card",
+            SaveMode::Local => "local",
+        }
+    }
+}
+
+/// Checksum of game data files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cksum {
+    pub algorithm: String,
+    pub digest: String,
+}
+
+/// The manifest — a JSON file placed in each game folder on physical media.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Manifest {
+    pub format_version: u32,
+    pub cartridge_id: Uuid,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_path: Option<String>,
+    pub exec_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exec_args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub save_mode: SaveMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checksum: Option<Cksum>,
+}
+
+fn default_platform() -> String { "pc".to_string() }
+
+impl Manifest {
+    pub fn new(title: String, exec_path: String, save_mode: SaveMode) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            cartridge_id: Uuid::new_v4(),
+            title,
+            version: None,
+            platform: default_platform(),
+            icon_path: None,
+            cover_path: None,
+            exec_path,
+            exec_args: None,
+            cwd: None,
+            save_mode,
+            save_path: None,
+            created_at: Utc::now(),
+            checksum: None,
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, CoreError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, CoreError> {
+        Ok(serde_json::to_vec(self)?)
+    }
+
+    pub fn from_json(data: &[u8]) -> Result<Self, CoreError> {
+        Ok(serde_json::from_slice(data)?)
+    }
+
+    pub fn from_json_str(s: &str) -> Result<Self, CoreError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    pub fn validate(&self) -> Result<(), CoreError> {
+        if self.title.trim().is_empty() {
+            return Err(CoreError::Validation("title must not be empty".into()));
+        }
+        if self.exec_path.trim().is_empty() {
+            return Err(CoreError::Validation("exec_path must not be empty".into()));
+        }
+        self.ensure_relative("exec_path", &self.exec_path)?;
+        if let Some(ref p) = self.icon_path { self.ensure_relative("icon_path", p)?; }
+        if let Some(ref p) = self.cover_path { self.ensure_relative("cover_path", p)?; }
+        if let Some(ref p) = self.cwd { self.ensure_relative("cwd", p)?; }
+        if let Some(ref p) = self.save_path { self.ensure_relative("save_path", p)?; }
+        if self.save_mode == SaveMode::OnCard && self.save_path.is_none() {
+            return Err(CoreError::Validation(
+                "save_path must be set when save_mode is 'on_card'".into(),
+            ));
+        }
+        if self.format_version != FORMAT_VERSION {
+            return Err(CoreError::Validation(format!(
+                "unsupported format_version: {}. Expected: {}",
+                self.format_version, FORMAT_VERSION
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_relative(&self, field: &str, path: &str) -> Result<(), CoreError> {
+        if path.len() >= 2 && path.as_bytes()[1] == b':' {
+            return Err(CoreError::Validation(format!("{field} must be a relative path, got: {path}")));
+        }
+        if path.starts_with('/') || path.starts_with('\\') {
+            return Err(CoreError::Validation(format!("{field} must be a relative path, got: {path}")));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manifest_roundtrip() {
+        let m = Manifest::new("Test Game".into(), "data/game.exe".into(), SaveMode::OnCard);
+        let json = m.to_json().unwrap();
+        let m2 = Manifest::from_json_str(&json).unwrap();
+        assert_eq!(m.cartridge_id, m2.cartridge_id);
+        assert_eq!(m.title, m2.title);
+        assert_eq!(m.exec_path, m2.exec_path);
+        assert_eq!(m.save_mode, m2.save_mode);
+    }
+
+    #[test]
+    fn test_validate_empty_title() {
+        let m = Manifest::new("".into(), "data/game.exe".into(), SaveMode::Local);
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_absolute_exec_path() {
+        let mut m = Manifest::new("Game".into(), "C:\\data\\game.exe".into(), SaveMode::Local);
+        m.exec_path = "C:\\data\\game.exe".to_string();
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_oncard_no_save_path() {
+        let m = Manifest::new("Game".into(), "data/game.exe".into(), SaveMode::OnCard);
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_valid_oncard() {
+        let mut m = Manifest::new("Game".into(), "data/game.exe".into(), SaveMode::OnCard);
+        m.save_path = Some("saves".into());
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn test_json_field_names_are_camelcase() {
+        let mut m = Manifest::new("Game".into(), "data/game.exe".into(), SaveMode::OnCard);
+        m.save_path = Some("saves".into());
+        m.exec_args = Some(vec!["--test".into()]);
+        m.checksum = Some(Cksum { algorithm: "blake3".into(), digest: "abc123".into() });
+        let json = m.to_json().unwrap();
+        assert!(json.contains("\"cartridgeId\""));
+        assert!(json.contains("\"formatVersion\""));
+        assert!(json.contains("\"createdAt\""));
+        assert!(json.contains("\"execPath\""));
+        assert!(json.contains("\"execArgs\""));
+        assert!(json.contains("\"saveMode\""));
+        assert!(json.contains("\"savePath\""));
+    }
+}
+
+================================================================================
+FILE: crates/cartridge-maker/Cargo.toml
+================================================================================
+[package]
+name = "cartridge-maker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI tool to burn games onto physical media as cartridges"
+
+[[bin]]
+name = "cartridge-maker"
+path = "src/main.rs"
+
+[dependencies]
+cartridge-core = { path = "../cartridge-core" }
+clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+anyhow = "1"
+colored = "2"
+walkdir = "2"
+indicatif = "0.17"
+
+================================================================================
+FILE: crates/cartridge-maker/src/main.rs
+================================================================================
+//! Cartridge Maker — burn a game folder onto physical media as a cartridge.
+mod cli;
+mod maker;
+
+fn main() -> anyhow::Result<()> {
+    cli::run()
+}
+
+================================================================================
+FILE: crates/cartridge-maker/src/cli.rs
+================================================================================
+use cartridge_core::SaveMode;
+use clap::{Parser, Subcommand};
+use crate::maker;
+
+#[derive(Parser, Debug)]
+#[command(name = "cartridge-maker", version, about = "Burn games onto physical media as cartridges", long_about = None)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    Make {
+        game_path: String,
+        card_path: String,
+        #[arg(short, long)]
+        name: Option<String>,
+        #[arg(short, long)]
+        exec: Option<String>,
+        #[arg(short, long, default_value = "on_card")]
+        save_mode: String,
+        #[arg(long)]
+        icon: Option<String>,
+        #[arg(long)]
+        cover: Option<String>,
+    },
+}
+
+pub fn run() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Commands::Make { game_path, card_path, name, exec, save_mode, icon, cover } => {
+            let save_mode = parse_save_mode(save_mode)?;
+            maker::make(game_path, card_path, name.as_deref(), exec.as_deref(), save_mode, icon.as_deref(), cover.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_save_mode(raw: &str) -> anyhow::Result<SaveMode> {
+    match raw.to_lowercase().as_str() {
+        "on_card" | "oncard" => Ok(SaveMode::OnCard),
+        "local" => Ok(SaveMode::Local),
+        other => anyhow::bail!("invalid save_mode: '{}'. Expected 'on_card' or 'local'.", other),
+    }
+}
+
+================================================================================
+FILE: crates/cartridge-maker/src/maker.rs
+================================================================================
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{bail, Context};
+use blake3::Hasher;
+use cartridge_core::{Cksum, Manifest, SaveMode};
+use colored::*;
+use indicatif::{ProgressBar, ProgressStyle};
+use walkdir::WalkDir;
+
+/// Create a cartridge on the target volume.
+pub fn make(
+    game_source: &str,
+    card_root: &str,
+    name: Option<&str>,
+    exec: Option<&str>,
+    save_mode: SaveMode,
+    icon_source: Option<&str>,
+    cover_source: Option<&str>,
+) -> anyhow::Result<()> {
+    let started = Instant::now();
+
+    // 1. Validate inputs
+    let game_dir = PathBuf::from(game_source);
+    if !game_dir.exists() { bail!("game source path does not exist: {}", game_source); }
+    if !game_dir.is_dir() { bail!("game source path is not a directory: {}", game_source); }
+    let card_dir = PathBuf::from(card_root);
+    if !card_dir.exists() { bail!("card path does not exist: {}", card_root); }
+    if !card_dir.is_dir() { bail!("card path is not a directory: {}", card_root); }
+
+    // 2. Determine game name
+    let game_name = name.map(|n| n.to_string()).unwrap_or_else(|| {
+        game_dir.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown Game".to_string())
+    });
+    let game_name = sanitize_folder_name(&game_name);
+    println!("{} {}", "▶ Game:".bold(), game_name.bright_white().bold());
+
+    // 3. Detect or accept executable
+    let exec_rel = if let Some(e) = exec {
+        let rel = e.replace('\\', "/");
+        let abs = game_dir.join(&rel);
+        if !abs.exists() { bail!("specified executable not found: {}", abs.display()); }
+        println!("{} {}", "▶ Exec:".bold(), rel.dimmed());
+        rel
+    } else {
+        let found = auto_detect_exe(&game_dir)?;
+        let stripped = found.strip_prefix(&game_dir).with_context(|| format!("failed to strip prefix"))?;
+        let rel = stripped.to_string_lossy().replace('\\', "/");
+        println!("{} {} {}", "▶ Exec:".bold(), rel.dimmed(), "(auto-detected)".dimmed());
+        rel
+    };
+
+    // 4. Prepare target directories
+    let cartridge_dir = card_dir.join(&game_name);
+    let data_dir = cartridge_dir.join("data");
+    let saves_dir = cartridge_dir.join("saves");
+
+    if cartridge_dir.exists() {
+        println!("{} Target folder '{}' already exists. Removing...", "⚠".yellow(), cartridge_dir.display());
+        fs::remove_dir_all(&cartridge_dir).with_context(|| format!("failed to remove: {}", cartridge_dir.display()))?;
+    }
+    fs::create_dir_all(&data_dir)?;
+    if save_mode == SaveMode::OnCard { fs::create_dir_all(&saves_dir)?; }
+
+    // 5. Copy game files + blake3 checksum
+    println!("{} Copying game files...", "⏳".bold());
+    let file_count = count_files(&game_dir);
+    let pb = ProgressBar::new(file_count as u64);
+    pb.set_style(ProgressStyle::with_template(
+        "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} files ({bytes_per_sec}, {eta})",
+    ).unwrap().progress_chars("#>-"));
+
+    let mut hasher = Hasher::new();
+    let mut copied = 0usize;
+    let mut total_bytes: u64 = 0;
+
+    for entry in WalkDir::new(&game_dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let relative = path.strip_prefix(&game_dir).unwrap_or(path);
+        let dest = data_dir.join(relative);
+        if path.is_dir() {
+            fs::create_dir_all(&dest)?;
+        } else {
+            let data = fs::read(path)?;
+            hasher.update(&data);
+            fs::write(&dest, &data)?;
+            total_bytes += data.len() as u64;
+            copied += 1;
+            pb.set_position(copied as u64);
+        }
+    }
+    pb.finish_and_clear();
+
+    let digest = hasher.finalize();
+    let digest_hex = digest.to_hex().to_string();
+    println!("{} Copied {} files ({} bytes)", "✓".green(), copied.to_string().bold(), format_bytes(total_bytes).bold());
+    println!("{} blake3 checksum: {}", "✓".green(), digest_hex.dimmed());
+
+    // 6. Copy optional icon/cover
+    let icon_path = if let Some(src) = icon_source {
+        copy_asset_file(src, &cartridge_dir, "icon")?;
+        Some(asset_rel_path(src, "icon"))
+    } else { None };
+
+    let cover_path = if let Some(src) = cover_source {
+        copy_asset_file(src, &cartridge_dir, "cover")?;
+        Some(asset_rel_path(src, "cover"))
+    } else { None };
+
+    // 7. Build and write manifest
+    let mut manifest = Manifest::new(game_name.clone(), exec_rel.clone(), save_mode);
+    manifest.version = None;
+    manifest.icon_path = icon_path;
+    manifest.cover_path = cover_path;
+    manifest.save_path = if save_mode == SaveMode::OnCard { Some("saves".to_string()) } else { None };
+    manifest.checksum = Some(Cksum { algorithm: "blake3".to_string(), digest: digest_hex });
+    manifest.validate()?;
+
+    let manifest_path = cartridge_dir.join("manifest.json");
+    let json = manifest.to_json()?;
+    fs::write(&manifest_path, json)?;
+
+    // 8. Summary
+    let elapsed = started.elapsed();
+    println!();
+    println!("{}", "══════════════════════════════════════".dimmed());
+    println!("{} Cartridge created successfully!", "✓".green().bold());
+    println!("{} ID:       {}", "•".dimmed(), manifest.cartridge_id.to_string().bright_white());
+    println!("{} Location: {}", "•".dimmed(), cartridge_dir.display().to_string().bright_white());
+    println!("{} Size:     {}  |  Files: {}  |  Time: {:.1}s", "•".dimmed(), format_bytes(total_bytes), copied, elapsed.as_secs_f64());
+    println!("{} Save:     {}", "•".dimmed(), match save_mode { SaveMode::OnCard => "on card (portable)".green(), SaveMode::Local => "local (host machine)".yellow() });
+    println!("{} Verify:   cartridge-maker verify {}", "•".dimmed(), cartridge_dir.display());
+    println!("{}", "══════════════════════════════════════".dimmed());
+    Ok(())
+}
+
+// ── Helpers ──
+
+fn auto_detect_exe(game_dir: &Path) -> anyhow::Result<PathBuf> {
+    let folder_name = game_dir.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut candidates: Vec<(PathBuf, u32, u64)> = Vec::new();
+
+    if let Ok(iter) = fs::read_dir(game_dir) {
+        for entry in iter.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_exe(&path) && !is_blacklisted(&path) {
+                let score = score_candidate(&path, &folder_name, 0);
+                let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+                candidates.push((path, score, size));
+            }
+        }
+    }
+
+    for entry in WalkDir::new(game_dir).min_depth(1).max_depth(3).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path().to_path_buf();
+        if path.is_file() && is_exe(&path) && !is_blacklisted(&path) {
+            let score = score_candidate(&path, &folder_name, 1);
+            let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+            candidates.push((path, score, size));
+        }
+    }
+
+    if candidates.is_empty() {
+        bail!("no suitable .exe found. Specify one with --exec <path>.");
+    }
+
+    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+
+    if candidates.len() == 1 { return Ok(candidates[0].0.clone()); }
+
+    let top: Vec<&(PathBuf, u32, u64)> = candidates.iter().take(9).collect();
+    println!();
+    println!("{}", "Multiple executables found. Choose one:".yellow().bold());
+    for (i, (path, _score, size)) in top.iter().enumerate() {
+        let relative = path.strip_prefix(game_dir).map(|p| p.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+        println!("  [{}] {}  ({})", (i + 1).to_string().green().bold(), relative, format_bytes(*size));
+    }
+    println!("  [0] Skip — I'll use --exec manually");
+
+    let choice = loop {
+        print!("{} ", ">".bold()); io::stdout().flush().ok();
+        let mut line = String::new(); io::stdin().lock().read_line(&mut line)?;
+        let trimmed = line.trim();
+        if let Ok(n) = trimmed.parse::<usize>() {
+            if n == 0 { bail!("no executable selected."); }
+            if n <= top.len() { break n; }
+        }
+        println!("{} Enter a number between 0 and {}", "⚠".yellow(), top.len());
+    };
+
+    Ok(top[choice - 1].0.clone())
+}
+
+const BLACKLIST: &[&str] = &[
+    "unitycrashhandler64", "unitycrashhandler32", "crashhandler",
+    "unins000", "uninstall", "uninst", "setup", "install",
+    "vcredist_x86", "vcredist_x64", "dxsetup", "dotnetfx",
+];
+
+fn is_exe(path: &Path) -> bool { path.extension().map(|e| e.eq_ignore_ascii_case("exe")).unwrap_or(false) }
+fn is_blacklisted(path: &Path) -> bool {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    BLACKLIST.iter().any(|b| stem.starts_with(b))
+}
+fn score_candidate(path: &Path, folder_name: &str, depth: u32) -> u32 {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mut score: u32 = 0;
+    if folder_name.contains(&stem) || stem.contains(folder_name) { score += 100; }
+    if depth == 0 { score += 10; }
+    score += (3u32).saturating_sub(depth);
+    score
+}
+fn count_files(dir: &Path) -> usize { WalkDir::new(dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()).count() }
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64; let mut unit_idx = 0;
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 { size /= 1024.0; unit_idx += 1; }
+    if unit_idx == 0 { format!("{} {}", bytes, UNITS[unit_idx]) }
+    else { format!("{:.2} {}", size, UNITS[unit_idx]) }
+}
+fn sanitize_folder_name(name: &str) -> String {
+    let forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    let mut result: String = name.chars().map(|c| if forbidden.contains(&c) { '_' } else { c }).collect();
+    result = result.trim().to_string();
+    if result.is_empty() { result = "Unknown Game".to_string(); }
+    result = result.trim_end_matches(&['.', ' '][..]).to_string();
+    result
+}
+fn copy_asset_file(source: &str, cartridge_dir: &Path, base_name: &str) -> anyhow::Result<()> {
+    let src = Path::new(source);
+    if !src.exists() { bail!("asset file not found: {}", source); }
+    if !src.is_file() { bail!("asset path is not a file: {}", source); }
+    let ext = src.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "png".to_string());
+    let dest = cartridge_dir.join(format!("{}.{}", base_name, ext));
+    fs::copy(src, &dest)?;
+    println!("{} Copied {} asset: {}", "✓".green(), base_name, dest.display().to_string().dimmed());
+    Ok(())
+}
+fn asset_rel_path(source: &str, base_name: &str) -> String {
+    let src = Path::new(source);
+    let ext = src.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_else(|| "png".to_string());
+    format!("{}.{}", base_name, ext)
+}
+
+================================================================================
+FILE: crates/cartridge-daemon/Cargo.toml
+================================================================================
+[package]
+name = "cartridge-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Background daemon that detects cartridge volumes on Windows"
+
+[[bin]]
+name = "cartridge-daemon"
+path = "src/main.rs"
+
+[dependencies]
+cartridge-core = { path = "../cartridge-core" }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation", "Win32_System_Console", "Win32_System_Threading",
+    "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging",
+] }
+anyhow = "1"
+colored = "2"
+uuid = "1"
+serde_json = "1"
+
+================================================================================
+FILE: crates/cartridge-daemon/src/main.rs
+================================================================================
+//! Cartridge Daemon — polling-only edition.
+//! No WM_DEVICECHANGE. Just 1-second polling: enumerate drives, diff, emit events.
+
+mod scanner;
+mod state;
+
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::time::Duration;
+use colored::*;
+use state::DaemonState;
+use uuid::Uuid;
+
+struct EventWriter {
+    inner: Option<BufWriter<File>>,
+}
+
+impl EventWriter {
+    fn open(path: Option<&str>) -> Self {
+        let inner = path.and_then(|p| File::create(p).ok().map(BufWriter::new));
+        Self { inner }
+    }
+
+    fn log(&mut self, event_type: &str, id: &Uuid, title: &str, drive: char, folder: &str) {
+        if let Some(ref mut w) = self.inner {
+            let t = serde_json::to_string(title).unwrap_or_else(|_| format!("\"{}\"", title));
+            let f = serde_json::to_string(folder).unwrap_or_else(|_| format!("\"{}\"", folder));
+            let line = format!(
+                r#"{{"type":"{}","id":"{}","title":{},"drive":"{}","folder":{}}}"#,
+                event_type, id, t, drive, f,
+            );
+            let _ = writeln!(w, "{}", line);
+            let _ = w.flush();
+        }
+    }
+}
+
+fn parse_args() -> (bool, Option<String>) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut verbose = false;
+    let mut events_file = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--events-file" if i + 1 < args.len() => { events_file = Some(args[i + 1].clone()); i += 1; }
+            _ => {}
+        }
+        i += 1;
+    }
+    (verbose, events_file)
+}
+
+fn main() {
+    let (verbose, events_file) = parse_args();
+    let mut events = EventWriter::open(events_file.as_deref());
+
+    println!("{}", "Cartridge Daemon v0.2.0 (polling)".cyan().bold());
+    if verbose { println!("{}", "  verbose mode ON".dimmed()); }
+
+    let mut state = DaemonState::new(verbose);
+    let mut polled: HashSet<char> = HashSet::new();
+
+    // Initial scan
+    for drive in scanner::enumerate_drives() {
+        if scanner::is_media_present(drive) {
+            scan_and_register(drive, &mut state, verbose, &mut events);
+            polled.insert(drive);
+        }
+    }
+
+    if state.cartridges.is_empty() {
+        println!("{} No cartridges found.", "ℹ".dimmed());
+    }
+    println!("{} Polling every 1s...  Ctrl+C to stop.\n", "⏳".bold());
+
+    // Main loop
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let current = scanner::enumerate_drives();
+
+        // Detect removed drives
+        for drive in state.active_drives() {
+            if !current.contains(&drive) || !scanner::is_media_present(drive) {
+                polled.remove(&drive);
+                let removed = state.remove_drive(drive);
+                for entry in &removed {
+                    println!("{} Removed:  \"{}\"  ({})", "–".red().bold(), entry.title.bright_white(), entry.cartridge_id.to_string().dimmed());
+                    events.log("removed", &entry.cartridge_id, &entry.title, drive, &entry.folder);
+                }
+            }
+        }
+
+        // Detect new drives
+        for drive in &current {
+            if !state.active_drives().contains(drive) && !polled.contains(drive) {
+                if !scanner::is_media_present(*drive) { continue; }
+                scan_and_register(*drive, &mut state, verbose, &mut events);
+                if state.active_drives().contains(drive) { polled.insert(*drive); }
+            }
+        }
+
+        // Sweep polled
+        for drive in polled.clone() {
+            if !current.contains(&drive) || !scanner::is_media_present(drive) { polled.remove(&drive); }
+        }
+    }
+}
+
+fn scan_and_register(drive: char, state: &mut DaemonState, verbose: bool, events: &mut EventWriter) {
+    if verbose { eprintln!("  [scan] Scanning drive {}: ...", drive); }
+    let found = scanner::scan_drive(drive, verbose);
+    for cartridge in &found {
+        let id = cartridge.manifest.cartridge_id;
+        let title = cartridge.manifest.title.clone();
+        let folder = cartridge.folder.clone();
+        if state.insert_cartridge(id, title.clone(), drive, folder.clone()) {
+            println!("{} Inserted: \"{}\"  ({})  on {}:\\{}", "+".green().bold(), title.bright_white(), id.to_string().dimmed(), drive, folder);
+            events.log("inserted", &id, &title, drive, &folder);
+        }
+    }
+}
+
+================================================================================
+FILE: crates/cartridge-daemon/src/scanner.rs
+================================================================================
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use cartridge_core::Manifest;
+
+#[derive(Debug)]
+pub struct FoundCartridge {
+    pub manifest: Manifest,
+    pub folder: String,
+}
+
+/// Check whether a drive has physical media inserted.
+pub fn is_media_present(drive: char) -> bool {
+    let root = wide_root(drive);
+    Path::new(&root).read_dir().is_ok()
+}
+
+/// Scan a drive's root for folders containing a valid manifest.json.
+pub fn scan_drive(drive: char, verbose: bool) -> Vec<FoundCartridge> {
+    let root = wide_root(drive);
+    let root_path = Path::new(&root);
+    let entries = match root_path.read_dir() {
+        Ok(e) => e,
+        Err(_) => { return Vec::new(); }
+    };
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() { continue; }
+        let manifest_path = path.join("manifest.json");
+        if !manifest_path.exists() { continue; }
+
+        let contents = match std::fs::read_to_string(&manifest_path) {
+            Ok(c) => c,
+            Err(e) => { eprintln!("  [scan] WARN: cannot read {}: {}", manifest_path.display(), e); continue; }
+        };
+
+        let manifest = match Manifest::from_json_str(&contents) {
+            Ok(m) => m,
+            Err(e) => { eprintln!("  [scan] WARN: invalid manifest in {}: {}", manifest_path.display(), e); continue; }
+        };
+
+        if let Err(e) = manifest.validate() {
+            eprintln!("  [scan] WARN: manifest validation failed: {}", e);
+            continue;
+        }
+
+        let folder = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "unknown".to_string());
+        if verbose { println!("  [scan] Found cartridge {} (id={}) in folder '{}'", manifest.title, manifest.cartridge_id, folder); }
+        found.push(FoundCartridge { manifest, folder });
+    }
+    found
+}
+
+fn wide_root(drive: char) -> String { format!("{}:\\", drive) }
+
+/// Enumerate all connected logical drives.
+pub fn enumerate_drives() -> Vec<char> {
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let mut drives = Vec::new();
+    for bit in 0..26 {
+        if mask & (1 << bit) != 0 { drives.push((b'A' + bit as u8) as char); }
+    }
+    drives
+}
+
+pub fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+================================================================================
+FILE: crates/cartridge-daemon/src/state.rs
+================================================================================
+use std::collections::HashMap;
+use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct CartridgeEntry {
+    pub cartridge_id: Uuid,
+    pub title: String,
+    pub drive: char,
+    pub folder: String,
+}
+
+pub struct DaemonState {
+    pub cartridges: HashMap<Uuid, CartridgeEntry>,
+    pub drive_to_ids: HashMap<char, Vec<Uuid>>,
+    pub drive_last_seen: HashMap<char, std::time::Instant>,
+    pub verbose: bool,
+}
+
+impl DaemonState {
+    pub fn new(verbose: bool) -> Self {
+        Self { cartridges: HashMap::new(), drive_to_ids: HashMap::new(), drive_last_seen: HashMap::new(), verbose }
+    }
+
+    pub fn insert_cartridge(&mut self, cartridge_id: Uuid, title: String, drive: char, folder: String) -> bool {
+        if self.cartridges.contains_key(&cartridge_id) { return false; }
+        self.cartridges.insert(cartridge_id, CartridgeEntry { cartridge_id, title, drive, folder });
+        self.drive_to_ids.entry(drive).or_default().push(cartridge_id);
+        true
+    }
+
+    pub fn remove_drive(&mut self, drive: char) -> Vec<CartridgeEntry> {
+        let ids = self.drive_to_ids.remove(&drive).unwrap_or_default();
+        let mut removed = Vec::new();
+        for id in &ids { if let Some(entry) = self.cartridges.remove(id) { removed.push(entry); } }
+        self.drive_last_seen.remove(&drive);
+        removed
+    }
+
+    pub fn touch_drive(&mut self, drive: char) { self.drive_last_seen.insert(drive, std::time::Instant::now()); }
+
+    pub fn active_drives(&self) -> Vec<char> { self.drive_to_ids.keys().copied().collect() }
+}
+
+================================================================================
+FILE: crates/cartridge-daemon/src/detector.rs (UNUSED — WM_DEVICECHANGE, not compiled in main.rs)
+================================================================================
+use std::sync::mpsc::Sender;
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::*;
+use crate::scanner;
+
+#[derive(Debug, Clone)]
+pub enum DriveEvent { Arrived(char), Removed(char) }
+
+// ... (WM_DEVICECHANGE WndProc — NOT used in current main.rs polling approach)
+
+================================================================================
+FILE: crates/cartridge-launcher-godot/project.godot
+================================================================================
+config_version=5
+
+[application]
+config/name="Cartridge Launcher"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+
+================================================================================
+FILE: crates/cartridge-launcher-godot/wave_bg.gdshader
+================================================================================
+shader_type canvas_item;
+
+uniform float wave_time = 0.0;
+uniform vec4 color_top : source_color = vec4(0.06, 0.04, 0.16, 1.0);
+uniform vec4 color_bottom : source_color = vec4(0.01, 0.10, 0.20, 1.0);
+
+void fragment() {
+	vec4 bg = mix(color_top, color_bottom, UV.y);
+
+	float w1 = sin(UV.x * 5.5 + wave_time * 0.35) * 0.022;
+	w1 += sin(UV.x * 3.8 + wave_time * 0.22) * 0.028;
+	w1 += sin(UV.x * 8.0 + wave_time * 0.50) * 0.012;
+	float y1 = 0.50 + w1;
+
+	float w2 = sin(UV.x * 7.0 - wave_time * 0.55) * 0.012;
+	w2 += cos(UV.x * 4.5 + wave_time * 0.30) * 0.018;
+	float y2 = 0.56 + w2;
+
+	float d1 = abs(UV.y - y1);
+	float glow1 = smoothstep(0.10, 0.0, d1) * 0.22;
+	glow1 += smoothstep(0.05, 0.0, d1) * 0.15;
+
+	float d2 = abs(UV.y - y2);
+	float glow2 = smoothstep(0.06, 0.0, d2) * 0.10;
+
+	float core = smoothstep(0.004, 0.0, d1) * 0.45;
+	core += smoothstep(0.012, 0.0, d1) * 0.15;
+
+	vec3 glow_col = vec3(0.5, 0.7, 1.0);
+
+	COLOR = bg;
+	COLOR.rgb = mix(COLOR.rgb, glow_col, glow1 + glow2);
+	COLOR.rgb = mix(COLOR.rgb, vec3(0.80, 0.88, 1.0), core);
+}
+
+================================================================================
+FILE: crates/cartridge-launcher-godot/main.tscn
+================================================================================
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Shader" path="res://wave_bg.gdshader" id="1_wave_shader"]
+[ext_resource type="Script" path="res://daemon_launcher.gd" id="2_script"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_wave"]
+shader = ExtResource("1_wave_shader")
+
+[sub_resource type="LabelSettings" id="LabelSettings_clock"]
+font_size = 20
+font_color = Color(0.82, 0.82, 0.82, 0.85)
+outline_size = 3
+outline_color = Color(0, 0, 0, 0.4)
+
+[sub_resource type="LabelSettings" id="LabelSettings_date"]
+font_size = 12
+font_color = Color(0.45, 0.45, 0.45, 0.75)
+
+[sub_resource type="LabelSettings" id="LabelSettings_cat_active"]
+font_size = 16
+font_color = Color(1, 1, 1, 1)
+outline_size = 3
+outline_color = Color(0, 0, 0, 0.35)
+
+[sub_resource type="LabelSettings" id="LabelSettings_cat_inactive"]
+font_size = 13
+font_color = Color(0.65, 0.65, 0.65, 0.6)
+
+[node name="Main" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("2_script")
+mouse_filter = 1
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0, 0, 0, 1)
+material = SubResource("ShaderMaterial_wave")
+mouse_filter = 2
+
+[node name="Particles" type="CPUParticles2D" parent="."]
+position = Vector2(640, 200)
+amount = 30
+lifetime = 14.0
+preprocess = 7.0
+speed_scale = 0.4
+emitting = true
+modulate = Color(1, 1, 1, 0.35)
+spread = 170.0
+gravity = Vector2(0, -5)
+initial_velocity_min = 6.0
+initial_velocity_max = 16.0
+scale_amount_min = 0.2
+scale_amount_max = 0.9
+color = Color(0.7, 0.8, 1, 0.25)
+
+[node name="UIContainer" type="Control" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 1
+
+[node name="ClockLabel" type="Label" parent="UIContainer"]
+layout_mode = 1
+anchor_left = 1.0; anchor_top = 0.0; anchor_right = 1.0; anchor_bottom = 0.0
+offset_left = -220.0; offset_top = 22.0; offset_right = -20.0; offset_bottom = 48.0
+text = "--:--"
+horizontal_alignment = 2
+label_settings = SubResource("LabelSettings_clock")
+mouse_filter = 2
+
+[node name="DateLabel" type="Label" parent="UIContainer"]
+layout_mode = 1
+anchor_left = 1.0; anchor_top = 0.0; anchor_right = 1.0; anchor_bottom = 0.0
+offset_left = -220.0; offset_top = 48.0; offset_right = -20.0; offset_bottom = 66.0
+text = "-/-"
+horizontal_alignment = 2
+label_settings = SubResource("LabelSettings_date")
+mouse_filter = 2
+
+[node name="CategoryRow" type="HBoxContainer" parent="UIContainer"]
+layout_mode = 0
+offset_left = 200.0; offset_top = 310.0; offset_right = 700.0; offset_bottom = 338.0
+theme_override_constants/separation = 48
+
+[node name="CatGames" type="Label" parent="UIContainer/CategoryRow"]
+layout_mode = 2; text = "Games"
+label_settings = SubResource("LabelSettings_cat_active"); mouse_filter = 2
+
+[node name="CatSettings" type="Label" parent="UIContainer/CategoryRow"]
+layout_mode = 2; text = "Settings"
+label_settings = SubResource("LabelSettings_cat_inactive"); mouse_filter = 2
+
+[node name="CatNetwork" type="Label" parent="UIContainer/CategoryRow"]
+layout_mode = 2; text = "Network"
+label_settings = SubResource("LabelSettings_cat_inactive"); mouse_filter = 2
+
+[node name="TabPages" type="Control" parent="UIContainer"]
+layout_mode = 1
+anchors_preset = 15; anchor_right = 1.0; anchor_bottom = 1.0
+mouse_filter = 1
+
+[node name="GamesPage" type="Control" parent="UIContainer/TabPages"]
+layout_mode = 1
+anchors_preset = 15; anchor_right = 1.0; anchor_bottom = 1.0
+mouse_filter = 1
+
+[node name="CartridgeList" type="VBoxContainer" parent="UIContainer/TabPages/GamesPage"]
+layout_mode = 0
+offset_left = 200.0; offset_top = 360.0; offset_right = 660.0; offset_bottom = 520.0
+theme_override_constants/separation = 2
+
+[node name="SettingsPage" type="Control" parent="UIContainer/TabPages"]
+visible = false
+layout_mode = 1
+anchors_preset = 15; anchor_right = 1.0; anchor_bottom = 1.0
+
+[node name="SettingsLabel" type="Label" parent="UIContainer/TabPages/SettingsPage"]
+layout_mode = 0
+offset_left = 220.0; offset_top = 370.0; offset_right = 600.0; offset_bottom = 430.0
+text = "Daemon: polling every 1s
+L1/R1 — tabs   D-pad — navigate
+A — launch   B — back   Y — select folder"
+label_settings = SubResource("LabelSettings_cat_inactive"); mouse_filter = 2
+
+[node name="NetworkPage" type="Control" parent="UIContainer/TabPages"]
+visible = false
+layout_mode = 1
+anchors_preset = 15; anchor_right = 1.0; anchor_bottom = 1.0
+
+[node name="NetworkLabel" type="Label" parent="UIContainer/TabPages/NetworkPage"]
+layout_mode = 0
+offset_left = 220.0; offset_top = 370.0; offset_right = 600.0; offset_bottom = 410.0
+text = "Network features coming soon"
+label_settings = SubResource("LabelSettings_cat_inactive"); mouse_filter = 2
+
+[node name="WizardContainer" type="Control" parent="UIContainer"]
+visible = false
+layout_mode = 1
+anchors_preset = 15; anchor_right = 1.0; anchor_bottom = 1.0
+mouse_filter = 1
+
+[node name="Breadcrumb" type="Label" parent="UIContainer/WizardContainer"]
+layout_mode = 0
+offset_left = 200.0; offset_top = 358.0; offset_right = 700.0; offset_bottom = 376.0
+text = "Games > New Cartridge"
+label_settings = SubResource("LabelSettings_date"); mouse_filter = 2
+
+[node name="WizardList" type="VBoxContainer" parent="UIContainer/WizardContainer"]
+layout_mode = 0
+offset_left = 200.0; offset_top = 384.0; offset_right = 660.0; offset_bottom = 520.0
+theme_override_constants/separation = 4
+
+[node name="WizardExtra" type="Control" parent="UIContainer/WizardContainer"]
+visible = false
+layout_mode = 0
+offset_left = 200.0; offset_top = 360.0; offset_right = 700.0; offset_bottom = 380.0
+mouse_filter = 1
+
+[node name="HintBar" type="Label" parent="UIContainer"]
+visible = false
+layout_mode = 0
+offset_left = 200.0; offset_top = 660.0; offset_right = 1080.0; offset_bottom = 680.0
+text = "A — Select   B — Back   D-pad — Navigate"
+label_settings = SubResource("LabelSettings_date"); mouse_filter = 2
+
+[node name="Timer" type="Timer" parent="."]
+wait_time = 0.2
+autostart = false
+
+================================================================================
+FILE: crates/cartridge-launcher-godot/daemon_launcher.gd (GDScript — 512 lines)
+================================================================================
+extends Control
+
+const DAEMON_PATH = "../../target/release/cartridge-daemon.exe"
+const MAKER_PATH = "../../target/release/cartridge-maker.exe"
+const EVENTS_FILE = "res://events.log"
+const POLL_INTERVAL = 0.2
+
+var daemon_pid: int = -1
+var cartridge_data: Dictionary = {}
+var events_file_path: String = ""
+var last_mtime: int = 0
+var wave_time: float = 0.0
+
+enum Tab { GAMES, SETTINGS, NETWORK }
+var current_tab: int = Tab.GAMES
+var selected_index: int = -1
+var nav_axis: int = 0
+var nav_hold_time: float = 0.0
+var nav_first: bool = true
+const NAV_INITIAL_DELAY: float = 0.50
+const NAV_REPEAT_RATE: float = 0.15
+
+var wizard_active: bool = false
+var wizard_step: int = 0
+var wizard_data: Dictionary = {}
+var browser_path: String = "C:\\"
+var browser_items: Array = []
+var browser_selected: int = 0
+
+@onready var cartridge_list: VBoxContainer = $UIContainer/TabPages/GamesPage/CartridgeList
+@onready var clock_label: Label = $UIContainer/ClockLabel
+@onready var date_label: Label = $UIContainer/DateLabel
+@onready var wave_bg: ColorRect = $Background
+@onready var cat_games: Label = $UIContainer/CategoryRow/CatGames
+@onready var cat_settings: Label = $UIContainer/CategoryRow/CatSettings
+@onready var cat_network: Label = $UIContainer/CategoryRow/CatNetwork
+@onready var tab_pages: Control = $UIContainer/TabPages
+@onready var wizard_container: Control = $UIContainer/WizardContainer
+@onready var breadcrumb: Label = $UIContainer/WizardContainer/Breadcrumb
+@onready var wizard_list: VBoxContainer = $UIContainer/WizardContainer/WizardList
+@onready var wizard_extra: Control = $UIContainer/WizardContainer/WizardExtra
+@onready var hint_bar: Label = $UIContainer/HintBar
+@onready var games_page: Control = $UIContainer/TabPages/GamesPage
+
+
+func _ready() -> void:
+	_setup_gamepad_actions()
+	events_file_path = ProjectSettings.globalize_path(EVENTS_FILE)
+	_update_clock()
+	_create_new_cartridge_card()
+	_start_daemon()
+	_switch_tab(Tab.GAMES)
+	_close_wizard()
+	hint_bar.visible = false
+	if not $Timer.timeout.is_connected(_on_timer_timeout):
+		$Timer.timeout.connect(_on_timer_timeout)
+	$Timer.wait_time = POLL_INTERVAL
+	$Timer.start()
+
+
+func _setup_gamepad_actions() -> void:
+	for action in ["tab_prev", "tab_next", "ui_select_folder"]:
+		if not InputMap.has_action(action):
+			InputMap.add_action(action)
+	for pair in [[0, "ui_accept"], [1, "ui_cancel"], [2, "ui_select"], [3, "ui_select_folder"], [3, "ui_select"]]:
+		var ev = InputEventJoypadButton.new()
+		ev.button_index = pair[0]
+		if not InputMap.action_has_event(pair[1], ev):
+			InputMap.action_add_event(pair[1], ev)
+	for pair in [[JOY_BUTTON_LEFT_SHOULDER, "tab_prev"], [JOY_BUTTON_RIGHT_SHOULDER, "tab_next"]]:
+		var ev = InputEventJoypadButton.new()
+		ev.button_index = pair[0]
+		if not InputMap.action_has_event(pair[1], ev):
+			InputMap.action_add_event(pair[1], ev)
+	for pair in [[KEY_Q, "tab_prev"], [KEY_E, "tab_next"], [KEY_F, "ui_select_folder"]]:
+		var k = InputEventKey.new()
+		k.keycode = pair[0]
+		if not InputMap.action_has_event(pair[1], k):
+			InputMap.action_add_event(pair[1], k)
+
+
+# ── Process ────────────────────────────────────────────────────────────────
+func _process(delta: float) -> void:
+	wave_time += delta
+	wave_bg.material.set_shader_parameter("wave_time", wave_time)
+	if Engine.get_process_frames() % 30 == 0: _update_clock()
+	if nav_axis != 0:
+		if nav_first:
+			_move_selection(nav_axis); nav_first = false; nav_hold_time = 0.0
+		else:
+			nav_hold_time += delta
+			var d = NAV_INITIAL_DELAY if nav_hold_time < 0.05 else NAV_REPEAT_RATE
+			if nav_hold_time >= d: _move_selection(nav_axis); nav_hold_time -= d
+	if nav_axis != 0 and not Input.is_action_pressed("ui_up") and not Input.is_action_pressed("ui_down"):
+		nav_axis = 0; nav_first = true
+
+
+func _update_clock() -> void:
+	var dt = Time.get_datetime_dict_from_system()
+	clock_label.text = "%02d:%02d" % [dt.hour, dt.minute]
+	date_label.text = "%d/%d" % [dt.month, dt.day]
+
+
+# ── Tab switching ──────────────────────────────────────────────────────────
+func _switch_tab(tab: int) -> void:
+	current_tab = tab
+	for page in tab_pages.get_children(): page.visible = false
+	tab_pages.get_child(tab).visible = true
+	cat_games.self_modulate = Color(1, 1, 1, 1 if tab == Tab.GAMES else 0.3)
+	cat_settings.self_modulate = Color(1, 1, 1, 1 if tab == Tab.SETTINGS else 0.3)
+	cat_network.self_modulate = Color(1, 1, 1, 1 if tab == Tab.NETWORK else 0.3)
+	selected_index = -1; _refresh_selection()
+
+
+# ── Input ──────────────────────────────────────────────────────────────────
+func _input(event: InputEvent) -> void:
+	if wizard_active:
+		if event.is_action_pressed("ui_cancel"):
+			if wizard_step == 2 and not _is_drive_root(browser_path):
+				browser_path = browser_path.get_base_dir(); _render_wizard_step()
+			elif wizard_step == 0:
+				_close_wizard()
+			else:
+				_prev_step()
+			accept_event(); return
+		if event.is_action_pressed("ui_select_folder"):
+			_wizard_select_folder(); accept_event(); return
+	if event.is_action_pressed("tab_prev"):
+		if not wizard_active: _switch_tab(wrapi(current_tab - 1, 0, 3))
+		accept_event(); return
+	if event.is_action_pressed("tab_next"):
+		if not wizard_active: _switch_tab(wrapi(current_tab + 1, 0, 3))
+		accept_event(); return
+	if event.is_action_pressed("ui_up"): nav_axis = -1; nav_first = true; nav_hold_time = 0.0; accept_event(); return
+	if event.is_action_pressed("ui_down"): nav_axis = 1; nav_first = true; nav_hold_time = 0.0; accept_event(); return
+	if event.is_action_released("ui_up") or event.is_action_released("ui_down"): nav_axis = 0; nav_first = true
+	if event.is_action_pressed("ui_accept"): _activate_selected(); accept_event(); return
+
+
+func _move_selection(direction: int) -> void:
+	if wizard_active:
+		browser_selected = wrapi(browser_selected + direction, 0, browser_items.size())
+		_refresh_browser(); return
+	if current_tab != Tab.GAMES: return
+	var children = cartridge_list.get_children()
+	if children.is_empty(): return
+	selected_index = wrapi(selected_index + direction, 0, children.size())
+	_refresh_selection()
+
+
+func _refresh_selection() -> void:
+	_refresh_list(cartridge_list.get_children(), selected_index)
+func _refresh_browser() -> void:
+	_refresh_list(wizard_list.get_children(), browser_selected)
+func _refresh_list(children: Array, sel: int) -> void:
+	for i in children.size():
+		var card = children[i]; var s = card.get_theme_stylebox("panel") as StyleBoxFlat
+		if s == null: continue
+		if i == sel: s.border_color = Color(0.45, 0.65, 1, 0.8); s.bg_color = Color(1, 1, 1, 0.06)
+		else: s.border_color = Color(0.3, 0.3, 0.3, 0.2); s.bg_color = Color(0, 0, 0, 0.2)
+
+
+func _activate_selected() -> void:
+	if wizard_active: _wizard_activate(); return
+	if current_tab != Tab.GAMES: return
+	var children = cartridge_list.get_children()
+	if selected_index < 0 or selected_index >= children.size(): return
+	var card = children[selected_index]
+	var act = card.get_meta("action", "")
+	match act:
+		"new_cartridge": _open_wizard()
+		"launch_game": _launch_game(card.get_meta("cartridge_id", ""))
+
+
+# ── Game launching ─────────────────────────────────────────────────────────
+func _launch_game(cart_id: String) -> void:
+	var data = cartridge_data.get(cart_id, null)
+	if data == null: return
+	var mp = "%s:\\%s\\manifest.json" % [data.drive, data.folder]
+	if not FileAccess.file_exists(mp): return
+	var f = FileAccess.open(mp, FileAccess.READ)
+	if f == null: return
+	var m = JSON.parse_string(f.get_as_text()); f.close()
+	if m == null: return
+	var exe = "%s:\\%s\\%s" % [data.drive, data.folder, m.get("execPath", "")]
+	OS.shell_open(exe)
+
+
+# ── Wizard: open / close ───────────────────────────────────────────────────
+func _open_wizard() -> void:
+	wizard_active = true; wizard_step = 0; wizard_data.clear()
+	wizard_data["save_mode"] = "on_card"; wizard_data["checksum"] = "on"
+	games_page.visible = false; wizard_container.visible = true; hint_bar.visible = true
+	_render_wizard_step()
+
+func _close_wizard() -> void:
+	wizard_active = false; games_page.visible = true; wizard_container.visible = false; hint_bar.visible = false
+	selected_index = 0; _refresh_selection()
+
+func _prev_step() -> void:
+	if wizard_step >= 1:
+		wizard_step -= 1
+		browser_selected = 0
+		_render_wizard_step()
+	else:
+		_close_wizard()
+
+func _next_step() -> void:
+	wizard_step += 1; browser_selected = 0; browser_items.clear(); _render_wizard_step()
+
+func _wizard_activate() -> void:
+	match wizard_step:
+		0: _wizard_step0_activate()
+		1: _wizard_step1_activate()
+		2: _wizard_step2_activate()
+		3: _wizard_step3_finish()
+		4: _wizard_step4_activate()
+
+
+# ── Wizard: render ─────────────────────────────────────────────────────────
+func _render_wizard_step() -> void:
+	_clear_wizard_children(); wizard_extra.visible = false
+	match wizard_step:
+		0:
+			breadcrumb.text = "Games > New Cartridge > Select Source"
+			hint_bar.text = "A — Select   B — Cancel"
+			for item in [["Copy game from folder...", "Copy files onto the cartridge", "copy"],
+			             ["Use folder already on drive", "Turn an existing folder into a cartridge", "existing"]]:
+				var card = _make_glass_card(item[0], item[1]); card.set_meta("wizard_action", item[2])
+				wizard_list.add_child(card)
+			browser_items = [{}, {}]; browser_selected = 0; _refresh_browser()
+		1:
+			breadcrumb.text = "Games > New Cartridge > Select Drive"
+			hint_bar.text = "A — Select drive   B — Back"
+			_build_drive_list()
+		2:
+			var src = wizard_data.get("source", "copy")
+			if src == "copy":
+				breadcrumb.text = "Games > New Cartridge > Select Game Folder"
+				hint_bar.text = "A — Enter   Y — Select folder   B — Back"
+				_build_browser("C:\\")
+			else:
+				breadcrumb.text = "Games > New Cartridge > Select Folder"
+				hint_bar.text = "A — Enter   Y — Select folder   B — Back"
+				_build_browser("%s:\\" % wizard_data.get("drive", "C"))
+		3:
+			breadcrumb.text = "Games > New Cartridge > Settings"
+			hint_bar.text = "A — Confirm   B — Back"
+			_build_settings_page()
+		4:
+			breadcrumb.text = "Games > New Cartridge > Confirm"
+			hint_bar.text = "A — Create   B — Back"
+			_build_summary_page()
+
+func _clear_wizard_children() -> void:
+	for c in wizard_list.get_children():
+		wizard_list.remove_child(c); c.queue_free()
+	for c in wizard_extra.get_children():
+		wizard_extra.remove_child(c); c.queue_free()
+
+
+# ── Wizard steps ───────────────────────────────────────────────────────────
+func _wizard_step0_activate() -> void:
+	var card = wizard_list.get_children()[browser_selected]
+	wizard_data["source"] = card.get_meta("wizard_action", "copy")
+	_next_step()
+
+func _wizard_step1_activate() -> void:
+	var children = wizard_list.get_children()
+	if children.is_empty(): return
+	wizard_data["drive"] = children[browser_selected].get_meta("drive_letter", "")
+	_next_step()
+
+func _wizard_step2_activate() -> void:
+	var children = wizard_list.get_children()
+	if children.is_empty(): return
+	var fname = children[browser_selected].get_meta("folder_name", "")
+	if fname != "":
+		browser_path = browser_path.path_join(fname)
+		_render_wizard_step()
+
+func _wizard_select_folder() -> void:
+	if wizard_step != 2: return
+	if _is_drive_root(browser_path): return
+	if wizard_data.get("source", "") == "existing":
+		_create_manifest_in_place()
+	else:
+		wizard_data["game_path"] = browser_path
+		_next_step()
+
+func _create_manifest_in_place() -> void:
+	var drive = wizard_data.get("drive", "C")
+	var folder = browser_path.get_file()
+	var target = "%s:\\%s" % [drive, folder]
+	var exe = ""
+	var dir = DirAccess.open(browser_path)
+	if dir:
+		dir.list_dir_begin()
+		var fname = dir.get_next()
+		while fname != "":
+			if fname.ends_with(".exe") and not fname.begins_with("UnityCrashHandler") and not fname.begins_with("unins"):
+				exe = fname
+				break
+			fname = dir.get_next()
+	DirAccess.make_dir_absolute(target + "/saves")
+	var manifest = {
+		"formatVersion": 1,
+		"cartridgeId": str(Time.get_unix_time_from_system()) + "-" + folder.replace(" ", "_"),
+		"title": folder,
+		"execPath": exe if exe != "" else "game.exe",
+		"saveMode": "on_card",
+		"savePath": "saves",
+		"createdAt": Time.get_datetime_string_from_system()
+	}
+	var f = FileAccess.open(target + "/manifest.json", FileAccess.WRITE)
+	if f:
+		f.store_string(JSON.stringify(manifest, "  "))
+		f.close()
+	print("[godot] Created manifest + saves in: %s" % target)
+	_close_wizard()
+
+func _wizard_step3_finish() -> void:
+	var ni = wizard_extra.get_node_or_null("NameInput") as LineEdit
+	if ni: wizard_data["name"] = ni.text.strip_edges()
+	_next_step()
+
+func _wizard_step4_activate() -> void:
+	var maker = ProjectSettings.globalize_path(MAKER_PATH)
+	if not FileAccess.file_exists(maker):
+		print("[godot] cartridge-maker.exe not found"); return
+	_clear_wizard_children()
+	breadcrumb.text = "Creating cartridge..."
+	hint_bar.text = "Please wait..."
+	var lbl = Label.new(); lbl.text = "Creating cartridge..."; lbl.add_theme_font_size_override("font_size", 14)
+	lbl.add_theme_color_override("font_color", Color(0.45, 0.65, 1, 0.85)); lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	wizard_list.add_child(lbl)
+	var args = PackedStringArray([maker, "make", wizard_data.get("game_path",""),
+		"%s:\\" % wizard_data.get("drive","C"), "--name", wizard_data.get("name","Game"),
+		"--save-mode", wizard_data.get("save_mode","on_card")])
+	OS.create_process(maker, args)
+	await get_tree().create_timer(6.0).timeout
+	var drive = wizard_data.get("drive", "C")
+	var name = wizard_data.get("name", "Game")
+	var expected = "%s:\\%s\\manifest.json" % [drive, name]
+	if FileAccess.file_exists(expected):
+		print("[godot] Cartridge created: %s" % expected)
+	else:
+		print("[godot] Manifest not found: %s" % expected)
+	_close_wizard()
+
+
+func _is_drive_root(path: String) -> bool:
+	return path.length() <= 3 and path.ends_with(":\\")
+
+
+# ── Browser ────────────────────────────────────────────────────────────────
+func _build_browser(path: String) -> void:
+	browser_path = path; _clear_wizard_children()
+	var pl = Label.new(); pl.text = browser_path; pl.add_theme_font_size_override("font_size", 10)
+	pl.add_theme_color_override("font_color", Color(0.35, 0.35, 0.35, 0.6)); wizard_extra.add_child(pl); wizard_extra.visible = true
+	browser_items.clear()
+	var dir = DirAccess.open(path)
+	if dir:
+		dir.list_dir_begin()
+		var dname = dir.get_next()
+		var folders = []
+		while dname != "":
+			if dir.current_is_dir() and not dname.begins_with("."):
+				var full_path = path.path_join(dname)
+				if DirAccess.open(full_path) != null:
+					folders.append(dname)
+			dname = dir.get_next()
+		folders.sort()
+		for fname in folders:
+			browser_items.append({"action":"folder","name":fname})
+			var card = _make_glass_card(fname, ""); card.set_meta("folder_name", fname)
+			wizard_list.add_child(card)
+	browser_selected = 0; _refresh_browser()
+	if browser_items.is_empty():
+		hint_bar.text = "Y — Select this folder   B — Back"
+		var card = _make_glass_card("(Select this folder)", browser_path)
+		wizard_list.add_child(card)
+		browser_items.append({"action":"folder","name":""})
+
+
+# ── Drive list ─────────────────────────────────────────────────────────────
+func _build_drive_list() -> void:
+	browser_items.clear()
+	for c in range(65, 91):
+		var ch = char(c); var dp = "%s:\\" % ch; var dir = DirAccess.open(dp)
+		if dir == null: continue
+		var label = "empty"
+		if dp.begins_with("C:"): label = "system"
+		var cnt = 0; dir.list_dir_begin(); var dn = dir.get_next()
+		while dn != "":
+			if dir.current_is_dir() and FileAccess.file_exists(dp + dn + "/manifest.json"): cnt += 1
+			dn = dir.get_next()
+		if cnt > 0: label = "%d cartridge%s" % [cnt, "s" if cnt > 1 else ""]
+		var card = _make_glass_card("%s:\\" % ch, label); card.set_meta("drive_letter", ch)
+		wizard_list.add_child(card); browser_items.append({"drive":ch})
+	browser_selected = 0; _refresh_browser()
+
+
+# ── Settings page ──────────────────────────────────────────────────────────
+func _build_settings_page() -> void:
+	var nl = Label.new(); nl.text = "Name:"; _add_label_style(nl); wizard_list.add_child(nl)
+	var ni = LineEdit.new(); ni.name = "NameInput"; ni.text = wizard_data.get("name","My Game")
+	ni.add_theme_font_size_override("font_size", 14); ni.add_theme_color_override("font_color", Color(1,1,1,0.9))
+	wizard_list.add_child(ni)
+	var sm = Label.new(); sm.text = "Save mode:  %s" % wizard_data.get("save_mode","on_card"); _add_label_style(sm)
+	wizard_list.add_child(sm)
+	var cs = Label.new(); cs.text = "Checksum:   %s" % wizard_data.get("checksum","on"); _add_label_style(cs)
+	wizard_list.add_child(cs)
+	browser_items = [{},{},{}]; browser_selected = 0; _refresh_browser()
+
+func _add_label_style(lbl: Label) -> void:
+	lbl.add_theme_font_size_override("font_size", 13); lbl.add_theme_color_override("font_color", Color(0.5,0.5,0.5,0.7))
+
+
+# ── Summary page ───────────────────────────────────────────────────────────
+func _build_summary_page() -> void:
+	var sm = Label.new()
+	sm.text = "%s  ->  %s:\\\nSave: %s" % [wizard_data.get("name","Game"), wizard_data.get("drive","?"), wizard_data.get("save_mode","on_card")]
+	sm.add_theme_font_size_override("font_size", 15); sm.add_theme_color_override("font_color", Color(1,1,1,0.85))
+	sm.add_theme_color_override("font_shadow_color", Color(0,0,0,0.5))
+	sm.add_theme_constant_override("shadow_offset_x", 1); sm.add_theme_constant_override("shadow_offset_y", 1)
+	sm.add_theme_constant_override("shadow_size", 4); wizard_list.add_child(sm)
+	var btn = Label.new(); btn.text = "        [ Create Cartridge ]"
+	btn.add_theme_font_size_override("font_size", 15); btn.add_theme_color_override("font_color", Color(0.45,0.65,1,0.85))
+	wizard_list.add_child(btn)
+	browser_items = [{},{}]; browser_selected = 1; _refresh_browser()
+
+
+# ── Glass card ─────────────────────────────────────────────────────────────
+func _create_new_cartridge_card() -> void:
+	var card = _make_glass_card("+ New Cartridge", "Create a cartridge from a game folder")
+	card.set_meta("action", "new_cartridge")
+	card.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT: _open_wizard())
+	cartridge_list.add_child(card)
+
+func _make_glass_card(title: String, subtitle: String) -> PanelContainer:
+	var card = PanelContainer.new(); card.custom_minimum_size = Vector2(440, 50)
+	var style = StyleBoxFlat.new(); style.bg_color = Color(0,0,0,0.22); style.set_corner_radius_all(6)
+	style.border_width_left = 3; style.border_color = Color(0.3,0.3,0.3,0.2)
+	style.content_margin_left = 14; style.content_margin_right = 14; style.content_margin_top = 6; style.content_margin_bottom = 6
+	card.add_theme_stylebox_override("panel", style)
+	var hbox = HBoxContainer.new(); hbox.add_theme_constant_override("separation", 10)
+	var icon = ColorRect.new(); icon.custom_minimum_size = Vector2(36, 36); icon.color = Color(1,1,1,0.06); hbox.add_child(icon)
+	var vbox = VBoxContainer.new()
+	var t = Label.new(); t.text = title; t.add_theme_font_size_override("font_size", 14)
+	t.add_theme_color_override("font_color", Color(1,1,1,0.88)); t.add_theme_color_override("font_shadow_color", Color(0,0,0,0.4))
+	t.add_theme_constant_override("shadow_offset_x",1); t.add_theme_constant_override("shadow_offset_y",1); t.add_theme_constant_override("shadow_size",4)
+	var s = Label.new(); s.text = subtitle; s.add_theme_font_size_override("font_size", 11)
+	s.add_theme_color_override("font_color", Color(0.42,0.42,0.42,0.65))
+	vbox.add_child(t); vbox.add_child(s); hbox.add_child(vbox); card.add_child(hbox)
+	return card
+
+
+# ── Daemon ─────────────────────────────────────────────────────────────────
+func _start_daemon() -> void:
+	var da = ProjectSettings.globalize_path(DAEMON_PATH)
+	if not FileAccess.file_exists(da): return
+	if FileAccess.file_exists(events_file_path):
+		var d = DirAccess.open("res://")
+		if d:
+			d.remove("events.log")
+	daemon_pid = OS.create_process(da, PackedStringArray(["--events-file", events_file_path]))
+func _exit_tree() -> void:
+	if daemon_pid > 0: OS.kill(daemon_pid)
+func _on_timer_timeout() -> void:
+	if not FileAccess.file_exists(events_file_path): return
+	var mt = FileAccess.get_modified_time(events_file_path)
+	if mt == last_mtime:
+		return
+	last_mtime = mt
+	var f = FileAccess.open(events_file_path, FileAccess.READ)
+	if f == null:
+		return
+	var t = f.get_as_text()
+	f.close()
+	for raw in t.split("\n", false):
+		var s = raw.strip_edges()
+		if s.is_empty():
+			continue
+		var d = JSON.parse_string(s)
+		if d == null:
+			continue
+		match d.get("type", ""):
+			"inserted": _add_cartridge(d)
+			"removed": _remove_cartridge(d.get("id", ""))
+
+func _add_cartridge(data: Dictionary) -> void:
+	var cid = data.get("id",""); var tt = data.get("title",""); var dr = data.get("drive",""); var fd = data.get("folder","")
+	if cartridge_data.has(cid): cartridge_data[cid].card_node.self_modulate = Color(1,1,1,1); return
+	var card = _make_glass_card(tt, "%s:\\%s" % [dr, fd]); card.set_meta("action","launch_game"); card.set_meta("cartridge_id",cid)
+	card.gui_input.connect(func(ev: InputEvent):
+		if ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			selected_index = cartridge_list.get_children().find(card); _refresh_selection(); _launch_game(cid))
+	cartridge_list.add_child(card); cartridge_data[cid]={title=tt,drive=dr,folder=fd,card_node=card}
+	if cartridge_data.size() == 1: selected_index = cartridge_list.get_children().find(card); _refresh_selection()
+
+func _remove_cartridge(cart_id: String) -> void:
+	var e = cartridge_data.get(cart_id, null); if e == null: return
+	e.card_node.self_modulate = Color(1,0.3,0.3,0.35)
+
+================================================================================
+KNOWN BUGS / ISSUES (что не работает)
+================================================================================
+
+1. FILE BROWSER IN WIZARD:
+   - "Copy from folder" browser starts at C:\ (not Desktop).
+   - When deleting cards: _clear_wizard_children() uses BOTH remove_child + queue_free (fixed).
+   - BUT: _build_browser only shows FOLDERS, not .exe files. User can only navigate 
+     into subfolders, not select the folder itself via A button.
+   - Pressing A on a folder enters it (works in theory).
+   - Pressing Y on an empty folder selects it (via "(Select this folder)" card).
+   - B goes back one level.
+   - The user reports the browser "doesn't work" and "doesn't go deeper" — 
+     possible cause: DirAccess.open(full_path) failing silently for some folders
+     (permissions, system folders, special characters).
+
+2. CARTRIDGE-MAKER INTEGRATION:
+   - In step 4 (Confirm → A → Create), cartridge-maker.exe is spawned via 
+     OS.create_process. The Godot script then waits 6 seconds and checks for 
+     manifest.json. BUT:
+     * cartridge-maker args: make <game_path> <card_root> --name <name> --save-mode <mode>
+     * The card_root is "%s:\\" % drive (e.g. "F:\")
+     * cartridge-maker creates cartridge_dir = card_dir.join(game_name) → "F:\GameName"
+     * The manifest check in Godot looks at "%s:\\%s\\manifest.json" % [drive, name] 
+     * PROBLEM: cartridge-maker SANITIZES the name (sanitize_folder_name) which may 
+       change it. Godot uses the raw name from the UI. If the raw name has spaces or 
+       special chars, the check fails.
+   - Progress bar within Godot: none. Just "Creating cartridge..." label + 6s wait.
+   - cartridge-maker has its OWN progress bar (indicatif) but Godot doesn't show it.
+
+3. DAEMON EVENTS.LOG & UI:
+   - Daemon writes to events.log, Godot polls via Timer every 0.2s.
+   - The daemon uses BufWriter — it flushes after every log() call.
+   - Godot checks FileAccess.get_modified_time() to avoid re-reading.
+   - PROBLEM: Godot's res:// path resolves to the project directory. The daemon
+     receives --events-file with the FULL path. But the Godot script uses
+     ProjectSettings.globalize_path(EVENTS_FILE) to resolve. If the path is wrong,
+     daemon writes to one file, Godot reads another.
+   - events_file_path = ProjectSettings.globalize_path("res://events.log") 
+     This should resolve to the project dir. But _start_daemon also passes 
+     events_file_path to the daemon. They should be the same path.
+
+4. GAME LAUNCHING:
+   - _launch_game reads manifest.json from the cartridge folder, gets execPath, 
+     and calls OS.shell_open(absolute_exe_path).
+   - execPath in manifest is RELATIVE (e.g. "data/hl2.exe"). Godot constructs:
+     "%s:\\%s\\%s" % [drive, folder, manifest["execPath"]]  → works.
+   - BUT: cartridge-maker puts the exe inside "data/" subfolder. So execPath is 
+     "data/game.exe". Godot constructs: "F:\GameName\data/game.exe" — Windows 
+     accepts forward slashes, so this should work.
+
+5. "USE EXISTING FOLDER" FLOW:
+   - Creates manifest.json IN-PLACE in the folder on the drive (without copying 
+     to a new location). But the target path: target = "%s:\\%s" % [drive, folder]
+     is constructed from drive + folder_name. 
+   - PROBLEM: it creates saves/ and manifest.json at the drive root + folder name,
+     but this may not match browser_path. If the user navigated to 
+     "D:\MyGame\SubFolder\" and pressed Y, then:
+     drive = "D", folder = "SubFolder", target = "D:\SubFolder"
+     BUT browser_path = "D:\MyGame\SubFolder". So target != browser_path!
+   - _create_manifest_in_place uses TARGET for manifest + saves creation, but 
+     the daemon scans AT TARGET, not at browser_path, so the manifest is in the 
+     wrong place.
+
+6. DRIVE BROWSE IN WIZARD:
+   - "Use existing folder" starts browser at "%s:\\" % drive.
+   - "Copy from folder" starts at "C:\\" (OS drive), not the target drive.
+   - User cannot switch drives WHILE inside the browser.
+   - Empty folders show "(Select this folder)" card — confusing UX.
+
+================================================================================
+WHAT NEEDS TO BE FIXED (приоритет)
+================================================================================
+
+P1: In-app file browser should show .exe files, not just folders. User needs to 
+    SEE game executables so they know it's the right folder. Currently only 
+    folders are shown.
+
+P2: The _create_manifest_in_place writes to a WRONG path (drive root + folder name
+    instead of actual browser_path). Must use browser_path as-is.
+
+P3: Cartridge-maker progress bar — Godot should read stdout from cartridge-maker 
+    process and show a ProgressBar. Or at minimum, run cartridge-maker and show 
+    its output in a terminal window.
+
+P4: Broader drive access — user should be able to browse ALL drives from within 
+    the browser (not just the target or C:). Option: add a "Drives" step before 
+    the browser, or show drive list as browser items above folders.
+
+P5: Game launching should set the working directory (cwd) from manifest, not just 
+    shell_open the exe. Use OS.create_process with cwd set to the game's data folder.
+
+================================================================================
