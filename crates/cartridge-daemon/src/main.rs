@@ -84,6 +84,7 @@ fn main() {
         if scanner::is_media_present(drive) {
             scan_and_register(drive, &mut state, verbose, &mut events);
             polled.insert(drive);
+            state.touch_drive(drive);
         }
     }
 
@@ -102,23 +103,29 @@ fn main() {
         tick += 1;
         let current = scanner::enumerate_drives();
 
-        // Detect removed drives
+        // Detect removed drives (debounced: require 3s absence)
         for drive in state.active_drives() {
             if !current.contains(&drive) || !scanner::is_media_present(drive) {
-                polled.remove(&drive);
-                let removed = state.remove_drive(drive);
-                for entry in &removed {
-                    println!(
-                        "{} Removed:  \"{}\"  ({})",
-                        "–".red().bold(),
-                        entry.title.bright_white(),
-                        entry.cartridge_id.to_string().dimmed()
-                    );
-                    events.log("removed", &entry.cartridge_id, &entry.title, drive, &entry.folder);
+                if state.is_drive_stale(drive) {
+                    polled.remove(&drive);
+                    let removed = state.remove_drive(drive);
+                    for entry in &removed {
+                        println!(
+                            "{} Removed:  \"{}\"  ({})",
+                            "–".red().bold(),
+                            entry.title.bright_white(),
+                            entry.cartridge_id.to_string().dimmed()
+                        );
+                        events.log("removed", &entry.cartridge_id, &entry.title, drive, &entry.folder);
+                    }
+                    if verbose && removed.is_empty() {
+                        println!("  (drive {} had no known cartridges)", drive);
+                    }
+                } else if verbose {
+                    println!("  [poll] Drive {}: media absent, waiting...", drive);
                 }
-                if verbose && removed.is_empty() {
-                    println!("  (drive {} had no known cartridges)", drive);
-                }
+            } else {
+                state.touch_drive(drive);
             }
         }
 
@@ -137,6 +144,7 @@ fn main() {
                 scan_and_register(*drive, &mut state, verbose, &mut events);
                 if state.active_drives().contains(drive) {
                     polled.insert(*drive);
+                    state.touch_drive(*drive);
                 }
             }
         }
@@ -154,6 +162,7 @@ fn main() {
             for drive in state.active_drives() {
                 if current.contains(&drive) && scanner::is_media_present(drive) {
                     scan_and_register(drive, &mut state, verbose, &mut events);
+                    state.touch_drive(drive);
                 }
             }
         }

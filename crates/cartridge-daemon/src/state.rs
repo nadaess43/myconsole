@@ -78,6 +78,14 @@ impl DaemonState {
             .insert(drive, std::time::Instant::now());
     }
 
+    /// Returns true if the drive has not been seen for 3+ seconds.
+    pub fn is_drive_stale(&self, drive: char) -> bool {
+        match self.drive_last_seen.get(&drive) {
+            Some(ts) => ts.elapsed() >= std::time::Duration::from_secs(3),
+            None => true, // never seen → treat as stale
+        }
+    }
+
     /// Get the set of drive letters that currently have cartridges registered.
     pub fn active_drives(&self) -> Vec<char> {
         self.drive_to_ids.keys().copied().collect()

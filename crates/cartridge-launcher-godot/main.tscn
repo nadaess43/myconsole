@@ -55,19 +55,23 @@ mouse_filter = 2
 color = Color(1, 1, 1, 1)
 
 [node name="Particles" type="CPUParticles2D" parent="." unique_id=269780228]
-modulate = Color(1, 1, 1, 0.55)
+modulate = Color(1, 1, 1, 0.30)
 position = Vector2(640, 310)
-amount = 45
-lifetime = 12.0
-preprocess = 6.0
-speed_scale = 0.55
-spread = 175.0
-gravity = Vector2(0, -6)
+amount = 55
+lifetime = 16.0
+preprocess = 4.0
+speed_scale = 0.25
+spread = 180.0
+gravity = Vector2(0, -10)
 initial_velocity_min = 5.0
-initial_velocity_max = 18.0
-scale_amount_min = 0.3
-scale_amount_max = 1.1
-color = Color(0.55, 0.70, 1, 0.45)
+initial_velocity_max = 15.0
+angular_velocity_min = -15.0
+angular_velocity_max = 15.0
+scale_amount_min = 0.15
+scale_amount_max = 0.8
+emission_shape = 0
+emission_box_extents = Vector3(1200, 0.03, 0)
+color = Color(0.40, 0.60, 1.0, 0.18)
 
 [node name="UIContainer" type="Control" parent="." unique_id=961064739]
 layout_mode = 1
