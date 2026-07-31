@@ -1,0 +1,16 @@
+# Rust
+target/
+debug/
+release/
+
+# Node / Tauri frontend
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

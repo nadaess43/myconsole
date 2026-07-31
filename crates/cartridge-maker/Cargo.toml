@@ -1,0 +1,20 @@
+[package]
+name = "cartridge-maker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI tool to burn games onto physical media as cartridges"
+
+[[bin]]
+name = "cartridge-maker"
+path = "src/main.rs"
+
+[dependencies]
+cartridge-core = { path = "../cartridge-core" }
+clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+anyhow = "1"
+colored = "2"
+walkdir = "2"
+indicatif = "0.17"

@@ -1,0 +1,16 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="Cartridge Launcher"
+config/description="Minimal cartridge launcher — list cartridges detected by the background daemon."
+run/main_scene="uid://dd6u61dvv4yev"
+config/features=PackedStringArray("4.7")

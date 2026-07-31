@@ -1,0 +1,20 @@
+[package]
+name = "cartridge-godot-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "GDExtension: cartridge daemon as a native Godot plugin"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+godot = "0.2"
+cartridge-core = { path = "../cartridge-core" }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }

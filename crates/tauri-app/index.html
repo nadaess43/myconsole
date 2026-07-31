@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cartridge Launcher</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0d0d0d;
+      color: #ccc;
+      padding: 24px;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: #555;
+      margin-bottom: 16px;
+    }
+    ul { list-style: none; }
+    li {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid #1a1a1a;
+      font-size: 15px;
+    }
+    li.empty { color: #444; font-style: italic; }
+    .marker {
+      font-weight: bold;
+      font-size: 16px;
+      width: 16px;
+    }
+    .marker.inserted { color: #4f4; }
+    .marker.removed { color: #f44; text-decoration: line-through; }
+    .title { color: #eee; }
+    .info { color: #555; font-size: 11px; margin-left: auto; }
+  </style>
+</head>
+<body>
+  <h1>Cartridges</h1>
+  <ul id="cartridge-list">
+    <li class="empty">Waiting for cartridges…</li>
+  </ul>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

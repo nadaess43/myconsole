@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cartridge-core",
+    "crates/cartridge-daemon",
+    "crates/cartridge-godot-ext",
+    "crates/cartridge-maker",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["cartridge-team"]
