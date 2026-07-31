@@ -4,6 +4,7 @@
 //! Just a straightforward 1‑second polling loop: enumerate drives,
 //! diff against known state, emit cartridge events.
 
+mod detector;
 mod scanner;
 mod state;
 
@@ -30,12 +31,13 @@ impl EventWriter {
 
     fn log(&mut self, event_type: &str, id: &Uuid, title: &str, drive: char, folder: &str) {
         if let Some(ref mut w) = self.inner {
-            let t = serde_json::to_string(title).unwrap_or_else(|_| format!("\"{}\"", title));
-            let f = serde_json::to_string(folder).unwrap_or_else(|_| format!("\"{}\"", folder));
-            let line = format!(
-                r#"{{"type":"{}","id":"{}","title":{},"drive":"{}","folder":{}}}"#,
-                event_type, id, t, drive, f,
-            );
+            let line = serde_json::json!({
+                "type": event_type,
+                "id": id.to_string(),
+                "title": title,
+                "drive": drive.to_string(),
+                "folder": folder,
+            });
             let _ = writeln!(w, "{}", line);
             let _ = w.flush();
         }
@@ -94,9 +96,10 @@ fn main() {
     println!("{} Polling every 1s...  Ctrl+C to stop.\n", "⏳".bold());
 
     // ── Main loop ──
+    let mut tick: u64 = 0;
     loop {
         std::thread::sleep(Duration::from_secs(1));
-
+        tick += 1;
         let current = scanner::enumerate_drives();
 
         // Detect removed drives
@@ -142,6 +145,16 @@ fn main() {
         for drive in polled.clone() {
             if !current.contains(&drive) || !scanner::is_media_present(drive) {
                 polled.remove(&drive);
+            }
+        }
+
+        // Periodic rescan of active drives (every 10s) — catches new cartridges
+        // written by the launcher / cartridge-maker without re-insertion.
+        if tick % 10 == 0 {
+            for drive in state.active_drives() {
+                if current.contains(&drive) && scanner::is_media_present(drive) {
+                    scan_and_register(drive, &mut state, verbose, &mut events);
+                }
             }
         }
     }

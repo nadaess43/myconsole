@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -28,6 +28,7 @@ pub fn make(
     save_mode: SaveMode,
     icon_source: Option<&str>,
     cover_source: Option<&str>,
+    non_interactive: bool,
 ) -> anyhow::Result<()> {
     let started = Instant::now();
 
@@ -87,7 +88,7 @@ pub fn make(
         println!("{} {}", "▶ Exec:".bold(), rel.dimmed());
         rel
     } else {
-        let found = auto_detect_exe(&game_dir)?;
+        let found = auto_detect_exe(&game_dir, non_interactive)?;
         let stripped = found
             .strip_prefix(&game_dir)
             .with_context(|| format!("failed to strip prefix from: {}", found.display()))?;
@@ -166,13 +167,28 @@ pub fn make(
             fs::create_dir_all(&dest)
                 .with_context(|| format!("failed to create dir: {}", dest.display()))?;
         } else {
-            // Read file content, update hasher, write to destination
-            let data = fs::read(path)
-                .with_context(|| format!("failed to read: {}", path.display()))?;
-            hasher.update(&data);
-            fs::write(&dest, &data)
-                .with_context(|| format!("failed to write: {}", dest.display()))?;
-            total_bytes += data.len() as u64;
+            // Stream file: read in 64KiB chunks, hash each chunk, write to dest.
+            // This avoids loading the entire file into memory (critical for large games).
+            let src_file = fs::File::open(path)
+                .with_context(|| format!("failed to open: {}", path.display()))?;
+            let dest_file = fs::File::create(&dest)
+                .with_context(|| format!("failed to create: {}", dest.display()))?;
+            let mut reader = io::BufReader::with_capacity(64 * 1024, src_file);
+            let mut writer = io::BufWriter::with_capacity(64 * 1024, dest_file);
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = reader.read(&mut buf)
+                    .with_context(|| format!("failed to read: {}", path.display()))?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                writer.write_all(&buf[..n])
+                    .with_context(|| format!("failed to write: {}", dest.display()))?;
+                total_bytes += n as u64;
+            }
+            writer.flush()
+                .with_context(|| format!("failed to flush: {}", dest.display()))?;
             copied += 1;
             pb.set_position(copied as u64);
         }
@@ -297,7 +313,7 @@ pub fn make(
 /// 3. Prefer candidates whose base name matches the game folder name.
 /// 4. Prefer root-level candidates over deeper ones.
 /// 5. Among remaining, prefer the largest file (game exes tend to be large).
-fn auto_detect_exe(game_dir: &Path) -> anyhow::Result<PathBuf> {
+fn auto_detect_exe(game_dir: &Path, non_interactive: bool) -> anyhow::Result<PathBuf> {
     let folder_name = game_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_lowercase())
@@ -347,6 +363,11 @@ fn auto_detect_exe(game_dir: &Path) -> anyhow::Result<PathBuf> {
 
     // Single clear winner — use it
     if candidates.len() == 1 {
+        return Ok(candidates[0].0.clone());
+    }
+
+    // Non-interactive: auto-pick best candidate (highest score, largest file)
+    if non_interactive {
         return Ok(candidates[0].0.clone());
     }
 
@@ -487,7 +508,7 @@ fn sanitize_folder_name(name: &str) -> String {
         result = "Unknown Game".to_string();
     }
     // Trim trailing dots/spaces (Windows constraint)
-    result = result.trim_end_matches(&['.', ' '][..]).to_string();
+    result = result.trim_end_matches(['.', ' '].as_slice()).to_string();
     result
 }
 

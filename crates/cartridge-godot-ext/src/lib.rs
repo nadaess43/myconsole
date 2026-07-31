@@ -64,6 +64,7 @@ fn scan_drive(drive: char) -> Vec<(Manifest, String)> {
 
 // ── Daemon state ──
 
+#[derive(Default)]
 struct DaemonState {
     /// Cartridge ID → (title, drive, folder)
     cartridges: HashMap<uuid::Uuid, (String, char, String)>,
@@ -75,11 +76,7 @@ struct DaemonState {
 
 impl DaemonState {
     fn new() -> Self {
-        Self {
-            cartridges: HashMap::new(),
-            drive_to_ids: HashMap::new(),
-            polled: HashSet::new(),
-        }
+        Self::default()
     }
 
     fn active_drives(&self) -> Vec<char> {
@@ -90,7 +87,7 @@ impl DaemonState {
 // ── CartridgeDaemon (Godot class) ──
 
 #[derive(GodotClass)]
-#[class(base = Node, init)]
+#[class(base = Node)]
 struct CartridgeDaemon {
     #[base]
     base: Base<Node>,

@@ -37,8 +37,7 @@ pub enum Commands {
         name: Option<String>,
 
         /// Relative path to the game executable inside the game folder
-        /// (e.g. "bin/game.exe"). If omitted, the first .exe found
-        /// in the folder is used.
+        /// (e.g. "bin/game.exe"). If omitted, auto-detected.
         #[arg(short, long)]
         exec: Option<String>,
 
@@ -53,6 +52,10 @@ pub enum Commands {
         /// Path to a cover/box art image to copy into the cartridge.
         #[arg(long)]
         cover: Option<String>,
+
+        /// Non-interactive: auto-pick best exe instead of showing a menu.
+        #[arg(long, default_value_t = false)]
+        non_interactive: bool,
     },
 }
 
@@ -68,6 +71,7 @@ pub fn run() -> anyhow::Result<()> {
             save_mode,
             icon,
             cover,
+            non_interactive,
         } => {
             let save_mode = parse_save_mode(save_mode)?;
             maker::make(
@@ -78,6 +82,7 @@ pub fn run() -> anyhow::Result<()> {
                 save_mode,
                 icon.as_deref(),
                 cover.as_deref(),
+                *non_interactive,
             )?;
         }
     }

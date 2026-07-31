@@ -17,10 +17,12 @@ var selected_index: int = -1
 var nav_axis: int = 0
 var nav_hold_time: float = 0.0
 var nav_first: bool = true
+var last_launch_ms: int = 0
 const NAV_INITIAL_DELAY: float = 0.50
 const NAV_REPEAT_RATE: float = 0.15
 
 var wizard_active: bool = false
+var wizard_creating: bool = false
 var wizard_step: int = 0
 var wizard_data: Dictionary = {}
 var browser_path: String = "C:\\"
@@ -75,7 +77,8 @@ func _setup_gamepad_actions() -> void:
 		ev.button_index = pair[0]
 		if not InputMap.action_has_event(pair[1], ev):
 			InputMap.action_add_event(pair[1], ev)
-	for pair in [[KEY_Q, "tab_prev"], [KEY_E, "tab_next"], [KEY_F, "ui_select_folder"]]:
+	for pair in [[KEY_Q, "tab_prev"], [KEY_E, "tab_next"], [KEY_F, "ui_select_folder"],
+		[KEY_BRACKETLEFT, "tab_prev"], [KEY_BRACKETRIGHT, "tab_next"]]:
 		var k = InputEventKey.new()
 		k.keycode = pair[0]
 		if not InputMap.action_has_event(pair[1], k):
@@ -106,12 +109,13 @@ func _update_clock() -> void:
 
 # ── Tab switching ──────────────────────────────────────────────────────────
 func _switch_tab(tab: int) -> void:
+	print("[%s] TAB: → %d" % [_ts(), tab])
 	current_tab = tab
 	for page in tab_pages.get_children(): page.visible = false
 	tab_pages.get_child(tab).visible = true
-	cat_games.self_modulate = Color(1, 1, 1, 1 if tab == Tab.GAMES else 0.3)
-	cat_settings.self_modulate = Color(1, 1, 1, 1 if tab == Tab.SETTINGS else 0.3)
-	cat_network.self_modulate = Color(1, 1, 1, 1 if tab == Tab.NETWORK else 0.3)
+	cat_games.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.GAMES else 0.28)
+	cat_settings.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.SETTINGS else 0.28)
+	cat_network.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.NETWORK else 0.28)
 	selected_index = -1; _refresh_selection()
 
 
@@ -142,7 +146,9 @@ func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("ui_up"): nav_axis = -1; nav_first = true; nav_hold_time = 0.0; accept_event(); return
 	if event.is_action_pressed("ui_down"): nav_axis = 1; nav_first = true; nav_hold_time = 0.0; accept_event(); return
 	if event.is_action_released("ui_up") or event.is_action_released("ui_down"): nav_axis = 0; nav_first = true
-	if event.is_action_pressed("ui_accept"): _activate_selected(); accept_event(); return
+	if event.is_action_pressed("ui_accept"):
+		if event is InputEventKey and event.echo: return
+		_activate_selected(); accept_event(); return
 
 
 func _move_selection(direction: int) -> void:
@@ -164,8 +170,14 @@ func _refresh_list(children: Array, sel: int) -> void:
 	for i in children.size():
 		var card = children[i]; var s = card.get_theme_stylebox("panel") as StyleBoxFlat
 		if s == null: continue
-		if i == sel: s.border_color = Color(0.45, 0.65, 1, 0.8); s.bg_color = Color(1, 1, 1, 0.06)
-		else: s.border_color = Color(0.3, 0.3, 0.3, 0.2); s.bg_color = Color(0, 0, 0, 0.2)
+		if i == sel:
+			s.border_color = Color(0.50, 0.70, 0.95, 0.45)
+			s.bg_color = Color(1, 1, 1, 0.09)
+			card.self_modulate = Color(1, 1, 1, 1)
+		else:
+			s.border_color = Color(1, 1, 1, 0.06)
+			s.bg_color = Color(1, 1, 1, 0.04)
+			card.self_modulate = Color(1, 1, 1, 0.85)
 
 
 func _activate_selected() -> void:
@@ -182,17 +194,35 @@ func _activate_selected() -> void:
 
 # ── Game launching ─────────────────────────────────────────────────────────
 func _launch_game(cart_id: String) -> void:
+	var now_ms = Time.get_ticks_msec()
+	if now_ms - last_launch_ms < 1000: return
+	last_launch_ms = now_ms
 	var data = cartridge_data.get(cart_id, null)
 	if data == null: return
+	var card_node = data.get("card_node", null)
+	if card_node != null:
+		card_node.self_modulate = Color(0.6, 0.8, 1.0, 0.5)
+		await _delay(0.15)
+		card_node.self_modulate = Color(1, 1, 1, 1)
 	var mp = "%s:\\%s\\manifest.json" % [data.drive, data.folder]
 	if not FileAccess.file_exists(mp): return
 	var f = FileAccess.open(mp, FileAccess.READ)
 	if f == null: return
 	var m = JSON.parse_string(f.get_as_text()); f.close()
 	if m == null: return
-	var exe = "%s:\\%s\\%s" % [data.drive, data.folder, m.get("execPath", "")]
-	print("[%s] LAUNCH: \"%s\"  →  %s" % [_ts(), m.get("title","?"), exe])
-	OS.shell_open(exe)
+	var exec_rel = m.get("execPath", "")
+	var exe = "%s:\\%s\\%s" % [data.drive, data.folder, exec_rel]
+	if not FileAccess.file_exists(exe):
+		exe = "%s:\\%s\\%s" % [data.drive, data.folder, "data/" + exec_rel]
+		if not FileAccess.file_exists(exe):
+			print("[%s] LAUNCH: exe not found — %s" % [_ts(), exe]); return
+	var args = PackedStringArray()
+	var raw_args = m.get("execArgs", null)
+	if raw_args != null and raw_args is Array:
+		for a in raw_args: args.append(str(a))
+	print("[%s] LAUNCH: \"%s\"  →  %s  args=%s" % [_ts(), m.get("title","?"), exe, args])
+	var pid = OS.create_process(exe, args)
+	print("[%s] LAUNCH: PID = %d" % [_ts(), pid])
 
 
 # ── Wizard: open / close ───────────────────────────────────────────────────
@@ -204,7 +234,8 @@ func _open_wizard() -> void:
 	_render_wizard_step()
 
 func _close_wizard() -> void:
-	wizard_active = false; games_page.visible = true; wizard_container.visible = false; hint_bar.visible = false
+	wizard_active = false; wizard_creating = false
+	games_page.visible = true; wizard_container.visible = false; hint_bar.visible = false
 	selected_index = 0; _refresh_selection()
 	print("[%s] WIZARD: Close" % _ts())
 
@@ -239,7 +270,7 @@ func _render_wizard_step() -> void:
 			breadcrumb.text = "Games > New Cartridge > Select Source"
 			hint_bar.text = "A — Select   B — Cancel"
 			for item in [["Copy game from folder...", "Copy files onto the cartridge", "copy"],
-			             ["Use folder already on drive", "Turn an existing folder into a cartridge", "existing"]]:
+						 ["Use folder already on drive", "Turn an existing folder into a cartridge", "existing"]]:
 				var card = _make_glass_card(item[0], item[1]); card.set_meta("wizard_action", item[2])
 				wizard_list.add_child(card)
 			browser_items = [{}, {}]; browser_selected = 0; _refresh_browser()
@@ -317,26 +348,19 @@ func _create_manifest_in_place() -> void:
 	var target = browser_path
 	var folder = browser_path.get_file()
 	print("[%s] MANIFEST: creating in-place at %s" % [_ts(), target])
-	var exe = ""
-	var dir = DirAccess.open(browser_path)
-	if dir:
-		dir.list_dir_begin()
-		var fname = dir.get_next()
-		while fname != "":
-			if fname.ends_with(".exe") and not fname.begins_with("UnityCrashHandler") and not fname.begins_with("unins"):
-				exe = fname
-				print("[%s] MANIFEST: auto-detected exe = \"%s\"" % [_ts(), exe])
-				break
-			fname = dir.get_next()
+	var exe = _find_exe_recursive(browser_path, 0)
+	if exe != "":
+		print("[%s] MANIFEST: auto-detected exe = \"%s\"" % [_ts(), exe])
 	if exe == "":
 		print("[%s] MANIFEST: no exe found, using default \"game.exe\"" % _ts())
 	DirAccess.make_dir_absolute(_join_win(target, "saves"))
 	print("[%s] MANIFEST: created saves/ directory" % _ts())
+	var exe_path = (exe if exe != "" else "game.exe").replace("\\", "/")
 	var manifest = {
 		"formatVersion": 1,
-		"cartridgeId": str(Time.get_unix_time_from_system()) + "-" + folder.replace(" ", "_"),
+		"cartridgeId": _uuid_v4(),
 		"title": folder,
-		"execPath": exe if exe != "" else "game.exe",
+		"execPath": exe_path,
 		"saveMode": "on_card",
 		"savePath": "saves",
 		"createdAt": Time.get_datetime_string_from_system()
@@ -346,6 +370,10 @@ func _create_manifest_in_place() -> void:
 		f.store_string(JSON.stringify(manifest, "  "))
 		f.close()
 		print("[%s] MANIFEST: SUCCESS — %s" % [_ts(), _join_win(target, "manifest.json")])
+		# Direct UI inject — don't wait for daemon rescan
+		var ev = {"id": manifest["cartridgeId"], "title": manifest["title"],
+			"drive": target[0], "folder": target.substr(3)}
+		_add_cartridge(ev)
 	else:
 		print("[%s] MANIFEST: ERROR — could not write %s" % [_ts(), _join_win(target, "manifest.json")])
 	_close_wizard()
@@ -357,6 +385,8 @@ func _wizard_step3_finish() -> void:
 	_next_step()
 
 func _wizard_step4_activate() -> void:
+	if wizard_creating: return
+	wizard_creating = true
 	print("[%s] WIZARD: Step 4 — Creating cartridge" % _ts())
 	print("[%s] WIZARD:   source = %s" % [_ts(), wizard_data.get("game_path","?")])
 	print("[%s] WIZARD:   drive  = %s:" % [_ts(), wizard_data.get("drive","?")])
@@ -406,7 +436,7 @@ func _do_create() -> void:
 
 	var game_path = wizard_data.get("game_path", "")
 	var drive = wizard_data.get("drive", "C")
-	var name = wizard_data.get("name", "Game")
+	var cart_name = wizard_data.get("name", "Game")
 	var save_mode = wizard_data.get("save_mode", "on_card")
 
 	print("[%s] MAKER: maker.exe = %s" % [_ts(), maker])
@@ -421,67 +451,111 @@ func _do_create() -> void:
 		if st: st.text = "Error: no source path"
 		return
 
-	var phases = [
-		[10, "Validating game path...", ""],
-		[22, "Scanning source directory...", ""],
-		[35, "Preparing target volume...", ""],
-		[50, "Copying game files...", ""],
-		[65, "Copying game data...", ""],
-		[78, "Verifying integrity...", ""],
-		[88, "Computing blake3 checksum...", ""],
-		[95, "Writing manifest.json...", ""],
-	]
-
-	for phase in phases:
-		if st: st.text = phase[1]
-		if pb: pb.value = phase[0]
-		await _delay(0.4)
-
-	print("[%s] MAKER: Spawning cartridge-maker.exe" % _ts())
-	if st: st.text = "Running cartridge-maker.exe..."
-	if pb: pb.value = 97
-
-	var args = PackedStringArray(["make", game_path,
-		"%s:\\" % drive, "--name", name, "--save-mode", save_mode])
+	# ── Build arguments WITHOUT _q() — Godot's PackedStringArray handles quoting ──
+	var args = PackedStringArray([
+		"make",
+		game_path,
+		"%s:\\" % drive,
+		"--name", cart_name,
+		"--save-mode", save_mode,
+		"--non-interactive"
+	])
 	var pid = OS.create_process(maker, args)
 	print("[%s] MAKER: PID = %d" % [_ts(), pid])
-	print("[%s] MAKER: args = make \"%s\" \"%s:\\\" --name \"%s\" --save-mode %s" % [_ts(), game_path, drive, name, save_mode])
+	print("[%s] MAKER: args = make \"%s\" \"%s:\\\" --name \"%s\" --save-mode %s --non-interactive" % [_ts(), game_path, drive, cart_name, save_mode])
 
 	if pid <= 0:
 		print("[%s] MAKER: ERROR — OS.create_process returned %d" % [_ts(), pid])
-		if st: st.text = "Error: failed to start process"
+		if st: st.text = "Error: failed to start maker process"
 		return
 
-	await _delay(5.0)
+	# ── Poll the maker process until it finishes (max 120s) ──
+	if st: st.text = "Running cartridge-maker.exe..."
+	if pb: pb.value = 0
+	var waited := 0.0
+	const POLL_STEP := 0.25
+	const MAX_WAIT := 120.0
 
-	var expected = "%s:\\%s\\manifest.json" % [drive, name]
-	print("[%s] MAKER: Checking %s" % [_ts(), expected])
+	while waited < MAX_WAIT:
+		await _delay(POLL_STEP)
+		waited += POLL_STEP
+		if pb: pb.value = minf(waited / MAX_WAIT * 100.0, 99.0)
+		if st: st.text = "Running... (%.0fs)" % waited
+		if not OS.is_process_running(pid):
+			break
 
-	if FileAccess.file_exists(expected):
+	var exit_code := -1
+	if not OS.is_process_running(pid):
+		exit_code = OS.get_process_exit_code(pid)
+		print("[%s] MAKER: process exited with code %d after %.1fs" % [_ts(), exit_code, waited])
+	else:
+		print("[%s] MAKER: process still running after %.1fs — giving up" % [_ts(), waited])
+		OS.kill(pid)
+
+	# ── Check result ──
+	var expected = "%s:\\%s\\manifest.json" % [drive, cart_name]
+	print("[%s] MAKER: Checking %s  (exit_code=%d)" % [_ts(), expected, exit_code])
+
+	if exit_code == 0 and FileAccess.file_exists(expected):
 		if pb: pb.value = 100
 		if st: st.text = "Complete!"
-		if dt: dt.text = "%s:\\%s" % [drive, name]
+		if dt: dt.text = "%s:\\%s" % [drive, cart_name]
 		print("[%s] MAKER: SUCCESS — %s" % [_ts(), expected])
-	else:
-		if pb: pb.value = 100
-		if st: st.text = "Warning: manifest not found"
-		if dt: dt.text = "Expected: %s" % expected
-		print("[%s] MAKER: FAIL — manifest not found" % _ts())
-		print("[%s] MAKER:   expected = %s" % [_ts(), expected])
-		# Diagnostic: list what actually exists on the drive
-		var diag = DirAccess.open("%s:\\" % drive)
-		if diag:
-			diag.list_dir_begin()
-			var item = diag.get_next()
-			var found = []
-			while item != "":
-				found.append(item)
-				item = diag.get_next()
-			print("[%s] MAKER:   drive %s: contents = %s" % [_ts(), drive, str(found)])
-		else:
-			print("[%s] MAKER:   drive %s: cannot open for listing" % drive)
+		# Direct UI inject — read manifest and add to list
+		var mf = FileAccess.open(expected, FileAccess.READ)
+		if mf:
+			var mn = JSON.parse_string(mf.get_as_text()); mf.close()
+			if mn != null:
+				var ev = {"id": str(mn.get("cartridgeId", "")), "title": str(mn.get("title", cart_name)),
+					"drive": drive, "folder": cart_name}
+				_add_cartridge(ev)
+				print("[%s] MAKER: injected into UI — \"%s\"" % [_ts(), ev.title])
+		await _delay(1.5)
+		_close_wizard()
+		return
 
-	await _delay(1.5)
+	# ── Failure: show real diagnostics ──
+	if pb: pb.value = 100
+	var err_msg := ""
+	if exit_code == -1:
+		err_msg = "Maker timed out (120s)"
+	elif exit_code != 0:
+		err_msg = "Maker failed (exit code %d)" % exit_code
+	else:
+		err_msg = "Manifest not found (maker exited OK but no output)"
+	print("[%s] MAKER: FAIL — %s" % [_ts(), err_msg])
+	print("[%s] MAKER:   expected = %s" % [_ts(), expected])
+
+	if st: st.text = err_msg
+	if dt: dt.text = "See console (~ key) for diagnostics"
+
+	# Diagnostic: list drive contents
+	var diag = DirAccess.open("%s:\\" % drive)
+	if diag:
+		diag.list_dir_begin()
+		var item = diag.get_next()
+		var found = []
+		while item != "":
+			found.append(item)
+			item = diag.get_next()
+		var listing = str(found)
+		print("[%s] MAKER:   drive %s: contents = %s" % [_ts(), drive, listing])
+		if dt: dt.text = "Drive contents: %s" % listing
+
+	# Also log the game_path structure for debugging
+	var game_dir = DirAccess.open(game_path)
+	if game_dir:
+		game_dir.list_dir_begin()
+		var item2 = game_dir.get_next()
+		var exe_count := 0
+		while item2 != "":
+			if item2.to_lower().ends_with(".exe"): exe_count += 1
+			item2 = game_dir.get_next()
+		print("[%s] MAKER:   source '%s' has %d .exe files" % [_ts(), game_path, exe_count])
+		if exe_count == 0:
+			if dt: dt.text += " | Source has NO .exe files!"
+
+	await _delay(3.0)
 	_close_wizard()
 
 func _delay(sec: float) -> void:
@@ -496,15 +570,42 @@ func _is_drive_root(path: String) -> bool:
 	var s = path.trim_suffix("\\").trim_suffix("/")
 	return s.length() == 2 and s.ends_with(":")
 
-func _join_win(base: String, name: String) -> String:
-	return base.trim_suffix("\\").trim_suffix("/") + "\\" + name
+func _join_win(base: String, sub: String) -> String:
+	return base.trim_suffix("\\").trim_suffix("/") + "\\" + sub
+
+func _uuid_v4() -> String:
+	var b = PackedByteArray(); b.resize(16)
+	for i in 16: b[i] = randi() % 256
+	b[6] = (b[6] & 0x0F) | 0x40
+	b[8] = (b[8] & 0x3F) | 0x80
+	return "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x" % [
+		b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7], b[8],b[9], b[10],b[11], b[12],b[13],b[14],b[15]]
+
+func _find_exe_recursive(base: String, depth: int) -> String:
+	if depth > 3: return ""
+	var dir = DirAccess.open(base)
+	if dir == null: return ""
+	dir.list_dir_begin()
+	var dname = dir.get_next()
+	var folders = []
+	while dname != "":
+		if dname.begins_with("."): dname = dir.get_next(); continue
+		if dir.current_is_dir():
+			folders.append(dname)
+		elif dname.to_lower().ends_with(".exe") and not dname.to_lower().begins_with("unitycrashhandler") and not dname.to_lower().begins_with("unins"):
+			return dname
+		dname = dir.get_next()
+	for fd in folders:
+		var sub = _find_exe_recursive(_join_win(base, fd), depth + 1)
+		if sub != "": return fd + "\\" + sub
+	return ""
 
 
 # ── Browser ────────────────────────────────────────────────────────────────
 func _build_browser(path: String) -> void:
 	browser_path = path; _clear_wizard_children()
 	var pl = Label.new(); pl.text = browser_path; pl.add_theme_font_size_override("font_size", 10)
-	pl.add_theme_color_override("font_color", Color(0.35, 0.35, 0.35, 0.6)); wizard_extra.add_child(pl); wizard_extra.visible = true
+	pl.add_theme_color_override("font_color", Color(0.45, 0.50, 0.58, 0.55)); wizard_extra.add_child(pl); wizard_extra.visible = true
 	browser_items.clear()
 
 	# At drive root: show drives for switching (copy mode). Existing users are on target drive already.
@@ -566,7 +667,9 @@ func _build_drive_list() -> void:
 func _build_settings_page() -> void:
 	var nl = Label.new(); nl.text = "Name:"; _add_label_style(nl); wizard_list.add_child(nl)
 	var ni = LineEdit.new(); ni.name = "NameInput"; ni.text = wizard_data.get("name","My Game")
-	ni.add_theme_font_size_override("font_size", 14); ni.add_theme_color_override("font_color", Color(1,1,1,0.9))
+	ni.add_theme_font_size_override("font_size", 14); ni.add_theme_color_override("font_color", Color(0.94, 0.95, 0.97, 0.92))
+	ni.add_theme_color_override("caret_color", Color(0.5, 0.7, 0.95, 0.8))
+	ni.add_theme_constant_override("margin_left", 8); ni.add_theme_constant_override("margin_right", 8)
 	wizard_list.add_child(ni)
 	var sm = Label.new(); sm.text = "Save mode:  %s" % wizard_data.get("save_mode","on_card"); _add_label_style(sm)
 	wizard_list.add_child(sm)
@@ -575,19 +678,30 @@ func _build_settings_page() -> void:
 	browser_items = [{},{},{}]; browser_selected = 0; _refresh_browser()
 
 func _add_label_style(lbl: Label) -> void:
-	lbl.add_theme_font_size_override("font_size", 13); lbl.add_theme_color_override("font_color", Color(0.5,0.5,0.5,0.7))
+	lbl.add_theme_font_size_override("font_size", 13)
+	lbl.add_theme_color_override("font_color", Color(0.55, 0.60, 0.68, 0.65))
 
 
 # ── Summary page ───────────────────────────────────────────────────────────
 func _build_summary_page() -> void:
 	var sm = Label.new()
 	sm.text = "%s  ->  %s:\\\nSave: %s" % [wizard_data.get("name","Game"), wizard_data.get("drive","?"), wizard_data.get("save_mode","on_card")]
-	sm.add_theme_font_size_override("font_size", 15); sm.add_theme_color_override("font_color", Color(1,1,1,0.85))
-	sm.add_theme_color_override("font_shadow_color", Color(0,0,0,0.5))
+	sm.add_theme_font_size_override("font_size", 15); sm.add_theme_color_override("font_color", Color(0.90, 0.92, 0.95, 0.85))
+	sm.add_theme_color_override("font_shadow_color", Color(0,0,0,0.3))
 	sm.add_theme_constant_override("shadow_offset_x", 1); sm.add_theme_constant_override("shadow_offset_y", 1)
-	sm.add_theme_constant_override("shadow_size", 4); wizard_list.add_child(sm)
-	var btn = Label.new(); btn.text = "        [ Create Cartridge ]"
-	btn.add_theme_font_size_override("font_size", 15); btn.add_theme_color_override("font_color", Color(0.45,0.65,1,0.85))
+	sm.add_theme_constant_override("shadow_size", 2); wizard_list.add_child(sm)
+	
+	var btn = PanelContainer.new(); btn.custom_minimum_size = Vector2(280, 40)
+	var st = StyleBoxFlat.new()
+	st.bg_color = Color(0.40, 0.60, 0.85, 0.18)
+	st.set_corner_radius_all(6)
+	st.border_width_left = 1; st.border_width_right = 1; st.border_width_top = 1; st.border_width_bottom = 1
+	st.border_color = Color(0.5, 0.7, 0.95, 0.35)
+	st.content_margin_top = 6; st.content_margin_bottom = 6
+	btn.add_theme_stylebox_override("panel", st)
+	var lbl = Label.new(); lbl.text = "Create Cartridge"; lbl.add_theme_font_size_override("font_size", 15)
+	lbl.add_theme_color_override("font_color", Color(0.85, 0.90, 0.98, 0.95))
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER; btn.add_child(lbl)
 	wizard_list.add_child(btn)
 	browser_items = [{},{}]; browser_selected = 1; _refresh_browser()
 
@@ -601,19 +715,27 @@ func _create_new_cartridge_card() -> void:
 	cartridge_list.add_child(card)
 
 func _make_glass_card(title: String, subtitle: String) -> PanelContainer:
-	var card = PanelContainer.new(); card.custom_minimum_size = Vector2(440, 50)
-	var style = StyleBoxFlat.new(); style.bg_color = Color(0,0,0,0.22); style.set_corner_radius_all(6)
-	style.border_width_left = 3; style.border_color = Color(0.3,0.3,0.3,0.2)
-	style.content_margin_left = 14; style.content_margin_right = 14; style.content_margin_top = 6; style.content_margin_bottom = 6
+	var card = PanelContainer.new(); card.custom_minimum_size = Vector2(460, 52)
+	var style = StyleBoxFlat.new()
+	style.bg_color = Color(1, 1, 1, 0.04)                 # стекло — почти прозрачное
+	style.set_corner_radius_all(8)
+	style.border_width_left = 1; style.border_width_right = 1
+	style.border_width_top = 1; style.border_width_bottom = 1
+	style.border_color = Color(1, 1, 1, 0.06)               # тонкая светлая рамка
+	style.content_margin_left = 16; style.content_margin_right = 16
+	style.content_margin_top = 7; style.content_margin_bottom = 7
 	card.add_theme_stylebox_override("panel", style)
-	var hbox = HBoxContainer.new(); hbox.add_theme_constant_override("separation", 10)
-	var icon = ColorRect.new(); icon.custom_minimum_size = Vector2(36, 36); icon.color = Color(1,1,1,0.06); hbox.add_child(icon)
+	var hbox = HBoxContainer.new(); hbox.add_theme_constant_override("separation", 12)
+	# Маленький индикатор вместо жирной иконки
+	var dot = ColorRect.new(); dot.custom_minimum_size = Vector2(4, 4)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	dot.color = Color(1, 1, 1, 0.12)
+	hbox.add_child(dot)
 	var vbox = VBoxContainer.new()
-	var t = Label.new(); t.text = title; t.add_theme_font_size_override("font_size", 14)
-	t.add_theme_color_override("font_color", Color(1,1,1,0.88)); t.add_theme_color_override("font_shadow_color", Color(0,0,0,0.4))
-	t.add_theme_constant_override("shadow_offset_x",1); t.add_theme_constant_override("shadow_offset_y",1); t.add_theme_constant_override("shadow_size",4)
+	var t = Label.new(); t.text = title; t.add_theme_font_size_override("font_size", 15)
+	t.add_theme_color_override("font_color", Color(0.94, 0.95, 0.97, 0.92))
 	var s = Label.new(); s.text = subtitle; s.add_theme_font_size_override("font_size", 11)
-	s.add_theme_color_override("font_color", Color(0.42,0.42,0.42,0.65))
+	s.add_theme_color_override("font_color", Color(0.45, 0.50, 0.58, 0.55))
 	vbox.add_child(t); vbox.add_child(s); hbox.add_child(vbox); card.add_child(hbox)
 	return card
 
@@ -677,5 +799,14 @@ func _add_cartridge(data: Dictionary) -> void:
 
 func _remove_cartridge(cart_id: String) -> void:
 	var e = cartridge_data.get(cart_id, null); if e == null: return
-	e.card_node.self_modulate = Color(1,0.3,0.3,0.35)
-	print("[%s] UI: - \"%s\"  total=%d" % [_ts(), e.get("title","?"), cartridge_data.size() - 1])
+	var card_node = e.get("card_node", null)
+	if card_node != null:
+		cartridge_list.remove_child(card_node)
+		card_node.queue_free()
+	# Update selected_index if the removed card was before or at the current selection
+	var children = cartridge_list.get_children()
+	if selected_index >= children.size():
+		selected_index = children.size() - 1
+	_refresh_selection()
+	cartridge_data.erase(cart_id)
+	print("[%s] UI: - \"%s\"  total=%d" % [_ts(), e.get("title","?"), cartridge_data.size()])

@@ -1,7 +1,31 @@
+//! WM_DEVICECHANGE-based volume detector.
+//!
+//! Creates a hidden popup window that listens for device-arrival / device-removal
+//! broadcasts.  When a volume (drive letter) appears or disappears, the detector
+//! sends a `DriveEvent` through the supplied channel.
+//!
+//! The receiver end is typically consumed by a coordinator thread that
+//! debounces events, scans for cartridge manifests, and maintains state.
+//!
+//! NOTE: This module is intentionally kept for future use. The current
+//! `main.rs` uses polling-only mode. To switch, spawn `run_detector` in a
+//! thread and feed its channel into the coordinator.
+
+// Win32 struct fields use the standard Win32 naming convention.
+#![allow(non_snake_case)]
+// Types and functions in this module are reserved for future use.
+#![allow(dead_code)]
+
 use std::sync::mpsc::Sender;
 
+// Only import what we actually use from windows-sys — avoid glob imports that
+// may conflict with manually-defined structs not exported by windows-sys 0.59.
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetMessageW, GetWindowLongPtrW, SetWindowLongPtrW,
+    GWLP_USERDATA, MSG, WM_CREATE, WM_DESTROY, WS_POPUP,
+};
 
 use crate::scanner;
 
@@ -12,7 +36,7 @@ pub enum DriveEvent {
     Removed(char),
 }
 
-// ── Manually-defined Win32 types (stable ABI, avoids windows-sys naming issues) ──
+// ── Manually-defined Win32 types not exported by windows-sys 0.59 ──
 
 #[repr(C)]
 struct WNDCLASSEXW {
@@ -59,8 +83,8 @@ const WM_DEVICECHANGE: u32 = 0x0219;
 const DBT_DEVICEARRIVAL: usize = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
 const DBT_DEVTYP_VOLUME: u32 = 2;
-const WS_POPUP: u32 = 0x80000000;
 
+// Functions not exported by windows-sys 0.59 for these features
 extern "system" {
     fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
     fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) -> u16;
@@ -72,6 +96,8 @@ struct DetectorContext {
     sender: Sender<DriveEvent>,
 }
 
+/// Run the Win32 message loop on the current thread.
+/// Blocks until a `WM_QUIT` message is received or the window is destroyed.
 pub fn run_detector(sender: Sender<DriveEvent>) {
     let ctx = Box::new(DetectorContext { sender });
     let ctx_ptr = Box::into_raw(ctx);

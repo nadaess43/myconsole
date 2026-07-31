@@ -12,7 +12,11 @@ use std::time::{Duration, Instant};
 
 use cartridge_core::Manifest;
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetMessageW, GetWindowLongPtrW, SetWindowLongPtrW,
+    GWLP_USERDATA, MSG, WM_CREATE, WM_DESTROY, WS_POPUP,
+};
 
 // ── Types ──
 
@@ -39,7 +43,7 @@ struct CartridgeEntry {
     folder: String,
 }
 
-// ── Win32 constants / structs ──
+// ── Manually-defined Win32 types not exported by windows-sys 0.59 ──
 
 #[repr(C)]
 struct WNDCLASSEXW {
@@ -86,7 +90,6 @@ const WM_DEVICECHANGE: u32 = 0x0219;
 const DBT_DEVICEARRIVAL: usize = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: usize = 0x8004;
 const DBT_DEVTYP_VOLUME: u32 = 2;
-const WS_POPUP: u32 = 0x80000000;
 
 extern "system" {
     fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
@@ -354,10 +357,27 @@ fn coordinator_loop(
                 }
 
                 // Polling fallback: detect removed drives
+                // Some card readers keep the drive letter even after media removal,
+                // so we must also check `is_media_present`.
                 let current = enumerate_drives();
                 for drive in polled.clone() {
-                    if !current.contains(&drive) {
+                    if !current.contains(&drive) || !is_media_present(drive) {
                         polled.remove(&drive);
+                        // Also fire removal events for cartridges on this drive
+                        // (if WM_DEVICECHANGE didn't already catch it)
+                        if let Some(ids) = drive_to_ids.remove(&drive) {
+                            for id in &ids {
+                                if let Some(entry) = cartridges.remove(id) {
+                                    let _ = tx.send(CartridgeEvent {
+                                        event: "removed".into(),
+                                        cartridge_id: id.to_string(),
+                                        title: entry.title,
+                                        drive: entry.drive,
+                                        folder: entry.folder,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
 
