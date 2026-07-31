@@ -10,6 +10,10 @@ var cartridge_data: Dictionary = {}
 var events_file_path: String = ""
 var last_mtime: int = 0
 var wave_time: float = 0.0
+var fireflies: Array = []
+var firefly_time: float = 0.0
+var firefly_texture: ImageTexture
+@onready var fireflies_node: Node2D = $Fireflies
 
 enum Tab { GAMES, SETTINGS, NETWORK }
 var current_tab: int = Tab.GAMES
@@ -60,6 +64,7 @@ func _ready() -> void:
 		$Timer.timeout.connect(_on_timer_timeout)
 	$Timer.wait_time = POLL_INTERVAL
 	$Timer.start()
+	_setup_fireflies()
 	print("[%s] INIT: Ready — polling every %.1fs" % [_ts(), POLL_INTERVAL])
 
 
@@ -99,6 +104,7 @@ func _process(delta: float) -> void:
 			if nav_hold_time >= d: _move_selection(nav_axis); nav_hold_time -= d
 	if nav_axis != 0 and not Input.is_action_pressed("ui_up") and not Input.is_action_pressed("ui_down"):
 		nav_axis = 0; nav_first = true
+	_update_fireflies(delta)
 
 
 func _update_clock() -> void:
@@ -810,3 +816,44 @@ func _remove_cartridge(cart_id: String) -> void:
 	_refresh_selection()
 	cartridge_data.erase(cart_id)
 	print("[%s] UI: - \"%s\"  total=%d" % [_ts(), e.get("title","?"), cartridge_data.size()])
+
+func _make_firefly_texture() -> ImageTexture:
+	var size := 16
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var center := Vector2(size / 2.0, size / 2.0)
+	for x in size:
+		for y in size:
+			var d: float = Vector2(x, y).distance_to(center) / (size / 2.0)
+			var a: float = clamp(1.0 - d, 0.0, 1.0)
+			a = pow(a, 2.0)
+			img.set_pixel(x, y, Color(1, 1, 1, a))
+	return ImageTexture.create_from_image(img)
+
+func _setup_fireflies() -> void:
+	firefly_texture = _make_firefly_texture()
+	var vp_size: Vector2 = get_viewport_rect().size
+	var band_top: float = vp_size.y * 0.42
+	var band_bottom: float = vp_size.y * 0.68
+	for i in 25:
+		var s := Sprite2D.new()
+		s.texture = firefly_texture
+		s.modulate = Color(0.85, 1.0, 0.55, 0.0)
+		s.scale = Vector2.ONE * randf_range(0.4, 1.1)
+		var pos := Vector2(randf_range(0, vp_size.x), randf_range(band_top, band_bottom))
+		s.position = pos
+		fireflies_node.add_child(s)
+		fireflies.append({
+			"sprite": s,
+			"phase": randf_range(0, TAU),
+			"speed": randf_range(0.35, 0.85),
+			"base_pos": pos,
+			"drift_seed": randf_range(0, TAU),
+		})
+
+func _update_fireflies(delta: float) -> void:
+	firefly_time += delta
+	for f in fireflies:
+		var t: float = firefly_time * f.speed + f.phase
+		var a: float = (sin(t) * 0.5 + 0.5) * 0.35 + 0.05
+		f.sprite.modulate.a = a
+		f.sprite.position = f.base_pos + Vector2(sin(t * 0.3 + f.drift_seed) * 6.0, cos(t * 0.25) * 4.0)

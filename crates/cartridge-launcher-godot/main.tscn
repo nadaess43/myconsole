@@ -6,8 +6,8 @@
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_wave"]
 shader = ExtResource("1_wave_shader")
 shader_parameter/wave_time = 0.0
-shader_parameter/color_top = Color(0.04, 0.08, 0.22, 1)
-shader_parameter/color_bottom = Color(0.01, 0.03, 0.10, 1)
+shader_parameter/color_top = Color(0.02, 0.09, 0.13, 1)
+shader_parameter/color_bottom = Color(0.03, 0.20, 0.32, 1)
 
 [sub_resource type="LabelSettings" id="LabelSettings_clock"]
 font_size = 26
@@ -54,24 +54,14 @@ grow_vertical = 2
 mouse_filter = 2
 color = Color(1, 1, 1, 1)
 
-[node name="Particles" type="CPUParticles2D" parent="." unique_id=269780228]
-modulate = Color(1, 1, 1, 0.30)
-position = Vector2(640, 310)
-amount = 55
-lifetime = 16.0
-preprocess = 4.0
-speed_scale = 0.25
-spread = 180.0
-gravity = Vector2(0, -10)
-initial_velocity_min = 5.0
-initial_velocity_max = 15.0
-angular_velocity_min = -15.0
-angular_velocity_max = 15.0
-scale_amount_min = 0.15
-scale_amount_max = 0.8
-emission_shape = 0
-emission_box_extents = Vector3(1200, 0.03, 0)
-color = Color(0.40, 0.60, 1.0, 0.18)
+[node name="Fireflies" type="Node2D" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 1
 
 [node name="UIContainer" type="Control" parent="." unique_id=961064739]
 layout_mode = 1
