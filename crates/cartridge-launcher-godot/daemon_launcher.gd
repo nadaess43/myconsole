@@ -832,20 +832,20 @@ func _make_firefly_texture() -> ImageTexture:
 func _setup_fireflies() -> void:
 	firefly_texture = _make_firefly_texture()
 	var vp_size: Vector2 = get_viewport_rect().size
-	var band_top: float = vp_size.y * 0.42
-	var band_bottom: float = vp_size.y * 0.68
-	for i in 25:
+	var band_top: float = vp_size.y * 0.32
+	var band_bottom: float = vp_size.y * 0.62
+	for i in 60:
 		var s := Sprite2D.new()
 		s.texture = firefly_texture
-		s.modulate = Color(0.85, 1.0, 0.55, 0.0)
-		s.scale = Vector2.ONE * randf_range(0.4, 1.1)
-		var pos := Vector2(randf_range(0, vp_size.x), randf_range(band_top, band_bottom))
+		s.modulate = Color(0.4, 0.6, 1.0, 0.0)
+		s.scale = Vector2.ONE * randf_range(0.3, 0.7)
+		var pos := Vector2(randf_range(vp_size.x * 0.2, vp_size.x * 0.88), randf_range(band_top, band_bottom))
 		s.position = pos
 		fireflies_node.add_child(s)
 		fireflies.append({
 			"sprite": s,
 			"phase": randf_range(0, TAU),
-			"speed": randf_range(0.35, 0.85),
+			"speed": randf_range(0.2, 0.55),
 			"base_pos": pos,
 			"drift_seed": randf_range(0, TAU),
 		})
