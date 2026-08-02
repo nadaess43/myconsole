@@ -22,8 +22,6 @@ var nav_axis: int = 0
 var nav_hold_time: float = 0.0
 var nav_first: bool = true
 var last_launch_ms: int = 0
-const NAV_INITIAL_DELAY: float = 0.50
-const NAV_REPEAT_RATE: float = 0.15
 
 var wizard_active: bool = false
 var wizard_creating: bool = false
@@ -32,6 +30,18 @@ var wizard_data: Dictionary = {}
 var browser_path: String = "C:\\"
 var browser_items: Array = []
 var browser_selected: int = 0
+
+# ── Animation state ────────────────────────────────────────────────────────
+var focus_tween: Tween
+const FOCUS_SCALE_FOCUSED: Vector2 = Vector2(1.04, 1.04)
+const FOCUS_SCALE_UNFOCUSED: Vector2 = Vector2(0.97, 0.97)
+const FOCUS_MODULATE_UNFOCUSED: float = 0.55
+const FOCUS_DURATION: float = 0.18
+const NAV_INITIAL_DELAY: float = 0.40
+const NAV_REPEAT_RATE: float = 0.08
+
+var tab_tween: Tween
+var wave_tween: Tween
 
 @onready var cartridge_list: VBoxContainer = $UIContainer/TabPages/GamesPage/CartridgeList
 @onready var clock_label: Label = $UIContainer/ClockLabel
@@ -47,6 +57,7 @@ var browser_selected: int = 0
 @onready var wizard_extra: Control = $UIContainer/WizardContainer/WizardExtra
 @onready var hint_bar: Label = $UIContainer/HintBar
 @onready var games_page: Control = $UIContainer/TabPages/GamesPage
+@onready var underline: ColorRect = $UIContainer/CategoryRow/Underline
 
 
 func _ready() -> void:
@@ -65,6 +76,7 @@ func _ready() -> void:
 	$Timer.wait_time = POLL_INTERVAL
 	$Timer.start()
 	_setup_fireflies()
+	_move_underline_to(cat_games, false)
 	print("[%s] INIT: Ready — polling every %.1fs" % [_ts(), POLL_INTERVAL])
 
 
@@ -116,13 +128,63 @@ func _update_clock() -> void:
 # ── Tab switching ──────────────────────────────────────────────────────────
 func _switch_tab(tab: int) -> void:
 	print("[%s] TAB: → %d" % [_ts(), tab])
+	var old_tab := current_tab
 	current_tab = tab
-	for page in tab_pages.get_children(): page.visible = false
-	tab_pages.get_child(tab).visible = true
+
+	# ── Animate underline ──
+	var target_label: Label
+	match tab:
+		Tab.GAMES: target_label = cat_games
+		Tab.SETTINGS: target_label = cat_settings
+		_: target_label = cat_network
+	_move_underline_to(target_label, true)
+
+	# ── Fade pages ──
+	if old_tab != tab:
+		if tab_tween and tab_tween.is_valid(): tab_tween.kill()
+		var old_page: Control = tab_pages.get_child(old_tab)
+		var new_page: Control = tab_pages.get_child(tab)
+		# Hide new page instantly, start fade-in after old fades out
+		new_page.visible = true
+		new_page.modulate.a = 0.0
+		tab_tween = create_tween()
+		tab_tween.tween_property(old_page, "modulate:a", 0.0, 0.12).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_CUBIC)
+		tab_tween.tween_callback(func():
+			old_page.visible = false; old_page.modulate.a = 1.0)
+		tab_tween.tween_property(new_page, "modulate:a", 1.0, 0.18).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	else:
+		var page: Control = tab_pages.get_child(tab)
+		page.visible = true; page.modulate.a = 1.0
+
+	# ── Category label modulate ──
 	cat_games.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.GAMES else 0.28)
 	cat_settings.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.SETTINGS else 0.28)
 	cat_network.self_modulate = Color(1, 1, 1, 1.0 if tab == Tab.NETWORK else 0.28)
+
+	# ── Wave pulse ──
+	_pulse_wave()
+
 	selected_index = -1; _refresh_selection()
+
+
+func _move_underline_to(label: Label, animate: bool) -> void:
+	var target_x: float = label.position.x
+	var target_w: float = label.size.x
+	if animate:
+		var ut = create_tween().set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+		ut.tween_property(underline, "position:x", target_x, 0.25)
+		ut.parallel().tween_property(underline, "size:x", target_w, 0.25)
+	else:
+		underline.position.x = target_x
+		underline.size.x = target_w
+
+
+func _pulse_wave() -> void:
+	if wave_tween and wave_tween.is_valid(): wave_tween.kill()
+	wave_bg.material.set_shader_parameter("wave_intensity", 1.0)
+	wave_tween = create_tween()
+	wave_tween.tween_property(wave_bg.material, "shader_parameter/wave_intensity", 1.3, 0.25).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	wave_tween.tween_property(wave_bg.material, "shader_parameter/wave_intensity", 1.0, 0.65).set_ease(Tween.EASE_IN_OUT).set_trans(Tween.TRANS_CUBIC)
 
 
 # ── Input ──────────────────────────────────────────────────────────────────
@@ -173,17 +235,23 @@ func _refresh_selection() -> void:
 func _refresh_browser() -> void:
 	_refresh_list(wizard_list.get_children(), browser_selected)
 func _refresh_list(children: Array, sel: int) -> void:
+	if children.is_empty(): return
+	if focus_tween and focus_tween.is_valid(): focus_tween.kill()
+	focus_tween = create_tween().set_parallel(true).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
 	for i in children.size():
-		var card = children[i]; var s = card.get_theme_stylebox("panel") as StyleBoxFlat
+		var card = children[i]
+		var s = card.get_theme_stylebox("panel") as StyleBoxFlat
 		if s == null: continue
 		if i == sel:
 			s.border_color = Color(0.50, 0.70, 0.95, 0.45)
 			s.bg_color = Color(1, 1, 1, 0.09)
-			card.self_modulate = Color(1, 1, 1, 1)
+			focus_tween.tween_property(card, "self_modulate", Color(1, 1, 1, 1), FOCUS_DURATION)
+			focus_tween.tween_property(card, "scale", FOCUS_SCALE_FOCUSED, FOCUS_DURATION)
 		else:
 			s.border_color = Color(1, 1, 1, 0.06)
 			s.bg_color = Color(1, 1, 1, 0.04)
-			card.self_modulate = Color(1, 1, 1, 0.85)
+			focus_tween.tween_property(card, "self_modulate", Color(1, 1, 1, FOCUS_MODULATE_UNFOCUSED), FOCUS_DURATION)
+			focus_tween.tween_property(card, "scale", FOCUS_SCALE_UNFOCUSED, FOCUS_DURATION)
 
 
 func _activate_selected() -> void:
@@ -722,6 +790,7 @@ func _create_new_cartridge_card() -> void:
 
 func _make_glass_card(title: String, subtitle: String) -> PanelContainer:
 	var card = PanelContainer.new(); card.custom_minimum_size = Vector2(460, 52)
+	card.pivot_offset = Vector2(230, 26)
 	var style = StyleBoxFlat.new()
 	style.bg_color = Color(1, 1, 1, 0.04)                 # стекло — почти прозрачное
 	style.set_corner_radius_all(8)

@@ -6,6 +6,7 @@
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_wave"]
 shader = ExtResource("1_wave_shader")
 shader_parameter/wave_time = 0.0
+shader_parameter/wave_intensity = 1.0
 shader_parameter/color_top = Color(0.02, 0.09, 0.13, 1)
 shader_parameter/color_bottom = Color(0.03, 0.20, 0.32, 1)
 
@@ -120,6 +121,14 @@ label_settings = SubResource("LabelSettings_cat_inactive")
 layout_mode = 2
 text = "Network"
 label_settings = SubResource("LabelSettings_cat_inactive")
+
+[node name="Underline" type="ColorRect" parent="UIContainer/CategoryRow"]
+layout_mode = 2
+offset_left = 0.0
+offset_top = 28.0
+offset_right = 46.0
+offset_bottom = 30.0
+color = Color(0.50, 0.70, 0.95, 0.70)
 
 [node name="TabPages" type="Control" parent="UIContainer" unique_id=1738518968]
 layout_mode = 1
