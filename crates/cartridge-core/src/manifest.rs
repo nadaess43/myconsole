@@ -220,6 +220,15 @@ impl Manifest {
                 "{field} must be a relative path, got: {path}"
             )));
         }
+        if path
+            .replace('\\', "/")
+            .split('/')
+            .any(|component| component == "..")
+        {
+            return Err(CoreError::Validation(format!(
+                "{field} must not escape the cartridge directory, got: {path}"
+            )));
+        }
         Ok(())
     }
 }
@@ -254,6 +263,15 @@ mod tests {
         let mut m = Manifest::new("Game".into(), "C:\\data\\game.exe".into(), SaveMode::Local);
         // Ensure we're testing the right thing
         m.exec_path = "C:\\data\\game.exe".to_string();
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_parent_path() {
+        let mut m = Manifest::new("Test".into(), "data/../game.exe".into(), SaveMode::Local);
+        assert!(m.validate().is_err());
+        m.exec_path = "data/game.exe".into();
+        m.cwd = Some("../outside".into());
         assert!(m.validate().is_err());
     }
 

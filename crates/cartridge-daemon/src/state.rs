@@ -18,17 +18,14 @@ pub struct DaemonState {
     pub drive_to_ids: HashMap<char, Vec<Uuid>>,
     /// When a drive was last reported as connected.
     pub drive_last_seen: HashMap<char, std::time::Instant>,
-    /// Whether to print diagnostics.
-    pub verbose: bool,
 }
 
 impl DaemonState {
-    pub fn new(verbose: bool) -> Self {
+    pub fn new(_verbose: bool) -> Self {
         Self {
             cartridges: HashMap::new(),
             drive_to_ids: HashMap::new(),
             drive_last_seen: HashMap::new(),
-            verbose,
         }
     }
 
@@ -57,6 +54,30 @@ impl DaemonState {
             .or_default()
             .push(cartridge_id);
         true
+    }
+
+    /// Update an existing cartridge's location metadata without changing its ID.
+    pub fn update_cartridge(&mut self, id: Uuid, title: String, folder: String) -> bool {
+        if let Some(entry) = self.cartridges.get_mut(&id) {
+            let changed = entry.title != title || entry.folder != folder;
+            entry.title = title;
+            entry.folder = folder;
+            return changed;
+        }
+        false
+    }
+
+    /// Remove one cartridge while keeping the drive index consistent.
+    pub fn remove_cartridge(&mut self, id: Uuid) -> Option<CartridgeEntry> {
+        let entry = self.cartridges.remove(&id)?;
+        let empty = if let Some(ids) = self.drive_to_ids.get_mut(&entry.drive) {
+            ids.retain(|known_id| *known_id != id);
+            ids.is_empty()
+        } else {
+            false
+        };
+        if empty { self.drive_to_ids.remove(&entry.drive); }
+        Some(entry)
     }
 
     /// Remove all cartridges for a disconnected drive. Returns the removed entries.

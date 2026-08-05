@@ -15,6 +15,7 @@ func _run() -> void:
 
 	inst._open_wizard()
 	await process_frame
+	print("T: wizard category hidden=", not inst.category_row.visible)
 	inst.browser_selected = 0
 	inst._wizard_activate()   # copy
 	await process_frame
@@ -45,6 +46,15 @@ func _run() -> void:
 	inst._wizard_select_folder()   # Y
 	await process_frame
 	print("S3 step=", inst.wizard_step, " children=", inst.wizard_list.get_child_count())
+	var first_card = null
+	for child in inst.wizard_list.get_children():
+		if child.has_meta("title_label"):
+			first_card = child
+			break
+	print("LAYOUT card=", first_card.size if first_card != null else Vector2.ZERO,
+		" scroll=", inst.wizard_scroll.size,
+		" card_left=", first_card.position.x if first_card != null else -1.0,
+		" centered=", first_card != null and first_card.size.x <= inst.wizard_scroll.size.x)
 
 	# ── A on NameInput row → enter edit mode ──
 	inst.browser_selected = 1
@@ -52,6 +62,9 @@ func _run() -> void:
 	await process_frame
 	var le = inst.wizard_list.get_node_or_null("NameInput") as LineEdit
 	print("E1 editing=", inst.settings_editing != null, " focus_mode=", le.focus_mode, " focused=", le.has_focus())
+	var original_name = le.text
+	var text_event = InputEventKey.new(); text_event.keycode = KEY_T; text_event.pressed = true
+	print("E1b ordinary key reaches field=", not inst.wizard.handle_input(text_event))
 
 	# ── Up key while editing must NOT move selection ──
 	var up = InputEventKey.new(); up.keycode = KEY_UP; up.pressed = true
@@ -59,11 +72,12 @@ func _run() -> void:
 	await process_frame
 	print("E2 sel unchanged=", inst.browser_selected == 1, " editing=", inst.settings_editing != null)
 
-	# ── Enter exits edit mode ──
-	var enter = InputEventKey.new(); enter.keycode = KEY_ENTER; enter.pressed = true
-	inst._input(enter)
+	# ── Escape exits edit mode without committing ──
+	le.text = "cancelled value"
+	var escape = InputEventKey.new(); escape.keycode = KEY_ESCAPE; escape.pressed = true
+	inst._input(escape)
 	await process_frame
-	print("E3 editing=", inst.settings_editing == null, " focus_mode=", le.focus_mode)
+	print("E3 editing=", inst.settings_editing == null, " restored=", le.text == original_name, " focus_mode=", le.focus_mode)
 
 	# ── Navigate to Done button and confirm ──
 	var done_idx := -1
@@ -87,6 +101,19 @@ func _run() -> void:
 	print("B4 step=", inst.wizard_step)
 	inst._prev_step(); await process_frame
 	print("B5 closed=", not inst.wizard_active)
+	print("T: category restored=", inst.category_row.visible)
+
+	# ── Settings tab: left/right changes and persists UI scale ──
+	inst._switch_tab(1)
+	await process_frame
+	var scale_before = inst.scale_slider.value
+	var right = InputEventKey.new(); right.keycode = KEY_RIGHT; right.pressed = true
+	inst._input(right)
+	await process_frame
+	print("UI scale changed=", inst.scale_slider.value > scale_before, " label=", inst.scale_label.text)
+	inst.scale_slider.value = 1.0
+	inst._switch_tab(0)
+	await process_frame
 
 	# ── Game settings: A on name → edit, A on Done → save+close ──
 	if inst.cartridge_data.size() > 0:

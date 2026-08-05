@@ -176,6 +176,22 @@ fn scan_and_register(drive: char, state: &mut DaemonState, verbose: bool, events
 
     let found = scanner::scan_drive(drive, verbose);
 
+    let found_ids: HashSet<Uuid> = found
+        .iter()
+        .map(|cartridge| cartridge.manifest.cartridge_id)
+        .collect();
+    let known_ids = state.drive_to_ids.get(&drive).cloned().unwrap_or_default();
+    for id in known_ids {
+        if !found_ids.contains(&id) {
+            if let Some(entry) = state.remove_cartridge(id) {
+                events.log("removed", &entry.cartridge_id, &entry.title, drive, &entry.folder);
+                if verbose {
+                    eprintln!("  [scan] Removed stale cartridge '{}'", entry.title);
+                }
+            }
+        }
+    }
+
     for cartridge in &found {
         let id = cartridge.manifest.cartridge_id;
         let title = cartridge.manifest.title.clone();
@@ -191,6 +207,11 @@ fn scan_and_register(drive: char, state: &mut DaemonState, verbose: bool, events
                 folder
             );
             events.log("inserted", &id, &title, drive, &folder);
+        } else if state.update_cartridge(id, title.clone(), folder.clone()) {
+            events.log("updated", &id, &title, drive, &folder);
+            if verbose {
+                eprintln!("  [scan] Updated cartridge '{}'", title);
+            }
         } else if verbose {
             eprintln!("  [scan] Cartridge {} already known, skipped", title);
         }

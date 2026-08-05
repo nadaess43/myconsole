@@ -141,20 +141,26 @@ mouse_filter = 1
 
 [node name="GamesPage" type="Control" parent="UIContainer/TabPages" unique_id=1233978329]
 layout_mode = 1
-anchor_right = 1.034
-anchor_bottom = 1.074
-offset_right = -0.16809082
-offset_bottom = 0.047973633
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 1
 
-[node name="CartridgeList" type="VBoxContainer" parent="UIContainer/TabPages/GamesPage" unique_id=576353243]
+[node name="GamesScroll" type="ScrollContainer" parent="UIContainer/TabPages/GamesPage" unique_id=576353243]
 layout_mode = 0
-offset_left = 200.0
+offset_left = 194.0
 offset_top = 360.0
-offset_right = 660.0
+offset_right = 676.0
 offset_bottom = 548.0
+horizontal_scroll_mode = 0
+clip_contents = true
+
+[node name="CartridgeList" type="VBoxContainer" parent="UIContainer/TabPages/GamesPage/GamesScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
 theme_override_constants/separation = 2
 
 [node name="SettingsPage" type="Control" parent="UIContainer/TabPages" unique_id=152668186]
@@ -166,16 +172,48 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 
+[node name="SettingsTitle" type="Label" parent="UIContainer/TabPages/SettingsPage"]
+layout_mode = 0
+offset_left = 200.0
+offset_top = 350.0
+offset_right = 700.0
+offset_bottom = 376.0
+text = "Launcher Settings"
+label_settings = SubResource("LabelSettings_cat_active")
+
 [node name="SettingsLabel" type="Label" parent="UIContainer/TabPages/SettingsPage" unique_id=1146385784]
 layout_mode = 0
 offset_left = 220.0
-offset_top = 370.0
-offset_right = 600.0
-offset_bottom = 430.0
-text = "Daemon: polling every 1s
+offset_top = 386.0
+offset_right = 700.0
+offset_bottom = 440.0
+text = "Daemon: polling every 0.2s
 L1/R1 — tabs   D-pad — navigate
-A — launch   B — back   Y — select folder"
+A — select   B — back   Y — select folder"
 label_settings = SubResource("LabelSettings_cat_inactive")
+
+[node name="ScaleContainer" type="HBoxContainer" parent="UIContainer/TabPages/SettingsPage"]
+layout_mode = 0
+offset_left = 220.0
+offset_top = 450.0
+offset_right = 600.0
+offset_bottom = 490.0
+theme_override_constants/separation = 12
+
+[node name="ScaleLabel" type="Label" parent="UIContainer/TabPages/SettingsPage/ScaleContainer"]
+layout_mode = 2
+text = "UI Scale: 1.00x"
+label_settings = SubResource("LabelSettings_cat_inactive")
+
+[node name="ScaleSlider" type="HSlider" parent="UIContainer/TabPages/SettingsPage/ScaleContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+focus_mode = 2
+custom_minimum_size = Vector2(200, 10)
+min_value = 0.75
+max_value = 1.5
+step = 0.05
+value = 1.0
 
 [node name="NetworkPage" type="Control" parent="UIContainer/TabPages" unique_id=1841782943]
 visible = false
@@ -217,19 +255,20 @@ label_settings = SubResource("LabelSettings_cat_active")
 [node name="Breadcrumb" type="Label" parent="UIContainer/WizardContainer" unique_id=796238939]
 layout_mode = 0
 offset_left = 200.0
-offset_top = 348.0
+offset_top = 358.0
 offset_right = 700.0
-offset_bottom = 368.0
+offset_bottom = 378.0
 text = "Games > New Cartridge"
 label_settings = SubResource("LabelSettings_hint")
 
 [node name="WizardScroll" type="ScrollContainer" parent="UIContainer/WizardContainer"]
 layout_mode = 0
-offset_left = 200.0
-offset_top = 396.0
-offset_right = 660.0
-offset_bottom = 548.0
+offset_left = 194.0
+offset_top = 410.0
+offset_right = 676.0
+offset_bottom = 562.0
 horizontal_scroll_mode = 0
+clip_contents = true
 
 [node name="WizardList" type="VBoxContainer" parent="UIContainer/WizardContainer/WizardScroll" unique_id=77843807]
 layout_mode = 2
@@ -241,18 +280,18 @@ theme_override_constants/separation = 4
 visible = false
 anchors_preset = 0
 offset_left = 200.0
-offset_top = 372.0
+offset_top = 382.0
 offset_right = 700.0
-offset_bottom = 392.0
+offset_bottom = 402.0
 mouse_filter = 1
 
 [node name="HintBar" type="Label" parent="UIContainer" unique_id=884510810]
 visible = false
 layout_mode = 0
-offset_left = 200.0
-offset_top = 556.0
-offset_right = 1080.0
-offset_bottom = 580.0
+offset_left = 194.0
+offset_top = 566.0
+offset_right = 676.0
+offset_bottom = 590.0
 text = "A — Select   B — Back   D-pad — Navigate"
 label_settings = SubResource("LabelSettings_hint")
 

@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cartridge_core::Manifest;
 
@@ -21,40 +21,26 @@ pub fn is_media_present(drive: char) -> bool {
     Path::new(&root).read_dir().is_ok()
 }
 
-/// Scan a drive's root for folders containing a valid `manifest.json`.
+/// Scan a drive for folders containing a valid `manifest.json`.
 ///
 /// Returns all valid cartridges found. Errors (bad JSON, missing
 /// fields, unreadable folders) are logged to stderr and skipped.
 pub fn scan_drive(drive: char, verbose: bool) -> Vec<FoundCartridge> {
     let root = wide_root(drive);
     let root_path = Path::new(&root);
-
-    let entries = match root_path.read_dir() {
-        Ok(e) => e,
-        Err(_) => {
-            if verbose {
-                eprintln!(
-                    "  [scan] {}: cannot read root directory (no media?)",
-                    root
-                );
-            }
-            return Vec::new();
+    if root_path.read_dir().is_err() {
+        if verbose {
+            eprintln!("  [scan] {}: cannot read root directory (no media?)", root);
         }
-    };
-
+        return Vec::new();
+    }
+    let mut cartridge_dirs = Vec::new();
+    let max_depth = if is_removable_drive(drive) { 3 } else { 0 };
+    collect_cartridge_dirs(root_path, 0, max_depth, &mut cartridge_dirs);
     let mut found = Vec::new();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
+    for path in cartridge_dirs {
         let manifest_path = path.join("manifest.json");
-        if !manifest_path.exists() {
-            continue;
-        }
-
         let contents = match std::fs::read_to_string(&manifest_path) {
             Ok(c) => c,
             Err(e) => {
@@ -89,9 +75,9 @@ pub fn scan_drive(drive: char, verbose: bool) -> Vec<FoundCartridge> {
         }
 
         let folder = path
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .strip_prefix(root_path)
+            .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| "unknown".to_string());
 
         if verbose {
             println!(
@@ -106,6 +92,32 @@ pub fn scan_drive(drive: char, verbose: bool) -> Vec<FoundCartridge> {
     }
 
     found
+}
+
+fn collect_cartridge_dirs(dir: &Path, depth: u32, max_depth: u32, result: &mut Vec<PathBuf>) {
+    let entries = match dir.read_dir() {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join("manifest.json").is_file() {
+            result.push(path);
+        } else if depth < max_depth {
+            collect_cartridge_dirs(&path, depth + 1, max_depth, result);
+        }
+    }
+}
+
+fn is_removable_drive(drive: char) -> bool {
+    let root = to_wide(&wide_root(drive));
+    unsafe {
+        // Win32 DRIVE_REMOVABLE is 2; windows-sys does not expose the constant here.
+        windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) == 2
+    }
 }
 
 /// Build a wide-string root path like `"F:\"`.

@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{bail, Context};
@@ -112,14 +113,15 @@ pub fn make(
     let data_dir = cartridge_dir.join("data");
     let saves_dir = cartridge_dir.join("saves");
 
+    if cartridge_dir == card_dir {
+        bail!("refusing to use the card root as the cartridge directory");
+    }
+
     if cartridge_dir.exists() {
-        println!(
-            "{} Target folder '{}' already exists. Removing...",
-            "⚠".yellow(),
+        bail!(
+            "target folder '{}' already exists; choose a different cartridge name",
             cartridge_dir.display()
         );
-        fs::remove_dir_all(&cartridge_dir)
-            .with_context(|| format!("failed to remove: {}", cartridge_dir.display()))?;
     }
 
     fs::create_dir_all(&data_dir)
@@ -214,12 +216,27 @@ pub fn make(
     // -----------------------------------------------------------------------
     // 6. Copy optional icon / cover
     // -----------------------------------------------------------------------
-    let icon_path = if let Some(src) = icon_source {
+    let mut icon_path = if let Some(src) = icon_source {
         copy_asset_file(src, &cartridge_dir, "icon")?;
         Some(asset_rel_path(src, "icon"))
     } else {
         None
     };
+
+    if icon_path.is_none() {
+        let exec_abs = game_dir.join(&exec_rel);
+        let icon_dest = cartridge_dir.join("icon.png");
+        print!("{} Auto-extracting icon... ", "⏳".bold());
+        match extract_exe_icon(&exec_abs, &icon_dest) {
+            Ok(()) => {
+                println!("{} icon.png", "✓".green());
+                icon_path = Some("icon.png".to_string());
+            }
+            Err(_) => {
+                println!("{}", "skipped (no icon in exe)".dimmed());
+            }
+        }
+    }
 
     let cover_path = if let Some(src) = cover_source {
         copy_asset_file(src, &cartridge_dir, "cover")?;
@@ -231,7 +248,8 @@ pub fn make(
     // -----------------------------------------------------------------------
     // 7. Build and write manifest
     // -----------------------------------------------------------------------
-    let mut manifest = Manifest::new(game_name.clone(), exec_rel.clone(), save_mode);
+    let manifest_exec = format!("data/{}", exec_rel.trim_start_matches('/'));
+    let mut manifest = Manifest::new(game_name.clone(), manifest_exec, save_mode);
     manifest.version = None; // user can edit later
     manifest.icon_path = icon_path;
     manifest.cover_path = cover_path;
@@ -509,6 +527,41 @@ fn sanitize_folder_name(name: &str) -> String {
     }
     // Trim trailing dots/spaces (Windows constraint)
     result = result.trim_end_matches(['.', ' '].as_slice()).to_string();
+    if result.is_empty() || result == "." || result == ".." {
+        result = "Unknown Game".to_string();
+    }
+    let stem = result
+        .split_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&result)
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        result.insert(0, '_');
+    }
     result
 }
 
@@ -544,4 +597,44 @@ fn asset_rel_path(source: &str, base_name: &str) -> String {
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_else(|| "png".to_string());
     format!("{}.{}", base_name, ext)
+}
+
+/// Extract the icon from a Windows executable using PowerShell / System.Drawing.
+fn extract_exe_icon(exe_path: &Path, output_png: &Path) -> anyhow::Result<()> {
+    let exe = exe_path.display().to_string().replace('\'', "''");
+    let out = output_png.display().to_string().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Drawing; \
+         $i=[System.Drawing.Icon]::ExtractAssociatedIcon('{}'); \
+         if(-not $i){{exit 1}}; \
+         $b=$i.ToBitmap(); \
+         $b.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png); \
+         $i.Dispose();$b.Dispose()",
+        exe, out
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .context("failed to run powershell for icon extraction")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "powershell exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_folder_name;
+
+    #[test]
+    fn sanitize_rejects_empty_and_reserved_names() {
+        assert_eq!(sanitize_folder_name("."), "Unknown Game");
+        assert_eq!(sanitize_folder_name("..."), "Unknown Game");
+        assert_eq!(sanitize_folder_name("CON"), "_CON");
+        assert_eq!(sanitize_folder_name("My:Game"), "My_Game");
+    }
 }
