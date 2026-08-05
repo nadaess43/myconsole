@@ -31,8 +31,8 @@ font_size = 14
 font_color = Color(0.55, 0.58, 0.64, 0.50)
 
 [sub_resource type="LabelSettings" id="LabelSettings_hint"]
-font_size = 11
-font_color = Color(0.45, 0.50, 0.58, 0.55)
+font_size = 14
+font_color = Color(0.80, 0.85, 0.92, 0.90)
 
 [node name="Main" type="Control" unique_id=1986899268]
 layout_mode = 3
@@ -154,7 +154,7 @@ layout_mode = 0
 offset_left = 200.0
 offset_top = 360.0
 offset_right = 660.0
-offset_bottom = 520.0
+offset_bottom = 548.0
 theme_override_constants/separation = 2
 
 [node name="SettingsPage" type="Control" parent="UIContainer/TabPages" unique_id=152668186]
@@ -205,39 +205,54 @@ grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 1
 
+[node name="WizardTitle" type="Label" parent="UIContainer/WizardContainer"]
+layout_mode = 0
+offset_left = 200.0
+offset_top = 328.0
+offset_right = 700.0
+offset_bottom = 354.0
+text = "New Cartridge"
+label_settings = SubResource("LabelSettings_cat_active")
+
 [node name="Breadcrumb" type="Label" parent="UIContainer/WizardContainer" unique_id=796238939]
 layout_mode = 0
 offset_left = 200.0
-offset_top = 358.0
+offset_top = 348.0
 offset_right = 700.0
-offset_bottom = 376.0
+offset_bottom = 368.0
 text = "Games > New Cartridge"
 label_settings = SubResource("LabelSettings_hint")
 
-[node name="WizardList" type="VBoxContainer" parent="UIContainer/WizardContainer" unique_id=77843807]
+[node name="WizardScroll" type="ScrollContainer" parent="UIContainer/WizardContainer"]
 layout_mode = 0
 offset_left = 200.0
-offset_top = 384.0
+offset_top = 396.0
 offset_right = 660.0
-offset_bottom = 520.0
+offset_bottom = 548.0
+horizontal_scroll_mode = 0
+
+[node name="WizardList" type="VBoxContainer" parent="UIContainer/WizardContainer/WizardScroll" unique_id=77843807]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
 theme_override_constants/separation = 4
 
 [node name="WizardExtra" type="Control" parent="UIContainer/WizardContainer" unique_id=366452148]
 visible = false
 anchors_preset = 0
 offset_left = 200.0
-offset_top = 360.0
+offset_top = 372.0
 offset_right = 700.0
-offset_bottom = 380.0
+offset_bottom = 392.0
 mouse_filter = 1
 
 [node name="HintBar" type="Label" parent="UIContainer" unique_id=884510810]
 visible = false
 layout_mode = 0
 offset_left = 200.0
-offset_top = 660.0
+offset_top = 556.0
 offset_right = 1080.0
-offset_bottom = 680.0
+offset_bottom = 580.0
 text = "A — Select   B — Back   D-pad — Navigate"
 label_settings = SubResource("LabelSettings_hint")
 
